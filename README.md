@@ -1,4 +1,4 @@
-# PRISM-Min
+# photonics-design-agent (PRISM-Min)
 
 **A minimal, attribution-capable LLM agent loop for photonic device design.**
 Predict → simulate → decompose the loss → keep or revert → journal.
@@ -52,7 +52,7 @@ voids the run instead of scoring it.
 ## Install
 
 ```bash
-git clone <this repo> && cd prism-min
+git clone https://github.com/<you>/photonics-design-agent.git && cd photonics-design-agent
 pip install -e .            # numpy, matplotlib, requests only
 cp .env.example .env        # fill in your LLM key (and LUMERICAL_ROOT)
 ```
@@ -163,7 +163,7 @@ ASCII path only).
 ## Repository layout
 
 ```
-prism_min/
+prism_min/            (package + CLI keep the method name: `prism ...`)
   geometry.py     Geometry IR (polygons + ports), builders, raster + morphology (numpy only)
   checks.py       DRC (min width/gap/area, ports) and sanity (mesh resolution, port straights, 4-fold symmetry)
   config.py       SimConfig (locked settings) + hash

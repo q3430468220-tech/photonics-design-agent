@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "prism-min"
+name = "photonics-design-agent"
 version = "0.1.0"
 description = "PRISM-Min: a minimal, attribution-capable LLM agent loop for photonic device design (predict -> simulate -> decompose -> keep/revert)."
 readme = "README.md"

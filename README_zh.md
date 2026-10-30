@@ -1,4 +1,4 @@
-# PRISM-Min（中文说明）
+# photonics-design-agent（PRISM-Min，中文说明）
 
 **一个最小的、可归因的光子器件设计 LLM agent 循环。**
 先预测 → 再仿真 → 分解损耗 → 保留或回滚 → 写日志。
@@ -27,7 +27,7 @@ agent "被允许做什么"由运行器强制执行，不靠提示词：每轮只
 ## 安装
 
 ```bash
-git clone <本仓库> && cd prism-min
+git clone https://github.com/<你的用户名>/photonics-design-agent.git && cd photonics-design-agent
 pip install -e .            # 只依赖 numpy、matplotlib、requests
 cp .env.example .env        # 填入大模型 API key（以及 LUMERICAL_ROOT）
 ```
