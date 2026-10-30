@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Experiment artifacts (keep program/design/model/laws/journal in git; drop heavy run data)
+experiments/**/runs/**/*.fsp
+experiments/**/runs/**/*.npz
+experiments/**/runs/**/*.png
+experiments/**/runs/**/*.log
+experiments/**/runs/pending_prediction.json
+experiments/**/_design_work.py
+
+# Lumerical
+*.fsp
+*.lms
+*.ldev
+*.icp
+*_p0.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# generated previews / reviews
+experiments/**/design_preview.png
