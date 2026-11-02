@@ -32,12 +32,18 @@ Which loss term dominates in the latest measurement, what mechanism causes it, a
 One or two sentences stating the concrete geometric (or model) change.
 
 ### CHANGE TYPE
-Exactly one word:
-  parameter  - same structure, only numbers changed (a width, a length, a radius)
-  shape      - same elements, a different curve/profile family (linear -> parabolic taper, arc -> Euler bend)
-  topology   - elements added, removed or replaced (add an MMI section, add subwavelength gratings, split a taper in two)
-  model      - (model turns only)
-The runner cross-checks this against the geometry diff and the evolution plot is annotated with it.
+`domain:kind` on one line. domain = what you changed; kind = how structural the change is.
+  domain:  geometry  (waveguide outline)      doping    (implant windows, concentrations, junction position)
+           stack     (etch depth, slab, materials, thickness)   electrode (metals, heaters, contacts, gaps)
+  kind:    parameter - same elements, only numbers changed (a width, a length, a concentration, a gap)
+           shape     - same elements, a different profile/family (linear -> parabolic taper, arc -> Euler bend,
+                       abrupt -> graded junction, p -> p+ region type)
+           topology  - elements added, removed or replaced (add an MMI section, add an intermediate p+ region,
+                       switch to an interleaved junction, add a heater)
+  Examples: geometry:parameter   doping:parameter   doping:topology   electrode:parameter   stack:shape
+  In a MODEL turn write: model
+The runner cross-checks this against the geometry/props diff and the evolution plot is annotated with it.
+If you changed several domains in one turn, name the most structural one and say so in CHANGE.
 
 ### LABEL
 A 3-8 word label for the evolution plot saying WHAT you did and WHY, e.g.

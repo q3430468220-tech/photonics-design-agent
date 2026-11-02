@@ -32,7 +32,36 @@ from .llm import LLM, LLMError
 # ----------------------------------------------------------------------------
 
 
-CHANGE_TYPES = ("parameter", "shape", "topology", "model")
+CHANGE_KINDS = ("parameter", "shape", "topology")
+CHANGE_DOMAINS = ("geometry", "doping", "stack", "electrode", "other")
+CHANGE_TYPES = CHANGE_KINDS + ("model",)  # legacy single-word forms
+
+
+def normalize_change_type(text: str) -> str:
+    """'doping:parameter' | 'doping parameter' | 'parameter' (= geometry:parameter) | 'model' -> canonical.
+
+    Returns 'domain:kind', 'model', or 'unspecified'.
+    """
+    toks = [t for t in re.split(r"[\s:/,|()\-]+", (text or "").strip().strip("`*").lower()) if t]
+    if not toks:
+        return "unspecified"
+    if toks[0] == "model":
+        return "model"
+    kind = next((t for t in toks if t in CHANGE_KINDS), None)
+    dom = next((t for t in toks if t in CHANGE_DOMAINS), None)
+    if kind is None:
+        return "unspecified"
+    return f"{dom or 'geometry'}:{kind}"
+
+
+def split_change_type(ct: str):
+    """-> (domain, kind) with sensible defaults for legacy / special values."""
+    if ct in ("model", "baseline", "unspecified", "none", None):
+        return ("geometry", ct or "unspecified")
+    if ":" in ct:
+        d, k = ct.split(":", 1)
+        return (d, k)
+    return ("geometry", ct)
 
 
 @dataclass
@@ -86,8 +115,7 @@ def parse_turn(text: str, expected_file: str) -> Turn:
         if s.startswith(("-", "*")) and s.lower() not in ("- none", "* none"):
             laws.append(s.lstrip("-* ").strip())
     ct_arg, ct_body = sections.get("CHANGE TYPE", (None, ""))
-    ct = (ct_arg or ct_body or "").strip().strip("`*").lower().split()
-    change_type = ct[0] if ct and ct[0] in CHANGE_TYPES else "unspecified"
+    change_type = normalize_change_type((ct_body or ct_arg or "").splitlines()[0] if (ct_body or ct_arg) else "")
     lb_arg, lb_body = sections.get("LABEL", (None, ""))
     label = (lb_body or lb_arg or "").strip().strip("`*\"'").splitlines()[0].strip() if (lb_body or lb_arg) else ""
     if not label:
@@ -108,11 +136,14 @@ def parse_turn(text: str, expected_file: str) -> Turn:
 def classify_change(prev_geom, new_geom) -> str:
     """Runner-side cross-check of the declared change type from the geometry diff.
 
-    topology  : different number of polygons or ports
-    shape     : same element count but the through-arm width profile changed its *form*
-                (sampled profile, normalised to the same start/end widths, differs)
-    parameter : same form, only scale/numbers differ
-    none      : identical geometry
+    Returns 'domain:kind' where domain is the design domain whose polygons/props changed
+    most fundamentally (geometry | doping | stack | electrode) and kind is
+        topology  : element count on that domain changed (region added / removed)
+        shape     : same elements, different normalised profile (geometry) or different
+                    layer set / dopant type (doping, stack, electrode)
+        parameter : only numbers changed (coordinates, concentrations, thickness)
+    plus 'none' (identical) and 'baseline'. Several domains changed -> the most
+    structural one wins (topology > shape > parameter), ties broken by domain order.
     """
     import numpy as np
 
@@ -122,8 +153,62 @@ def classify_change(prev_geom, new_geom) -> str:
         return "baseline"
     if prev_geom.hash() == new_geom.hash():
         return "none"
-    if len(prev_geom.polygons) != len(new_geom.polygons) or len(prev_geom.ports) != len(new_geom.ports):
-        return "topology"
+
+    def by_domain(g):
+        out = {}
+        for p in g.polygons:
+            out.setdefault(p.domain, []).append(p)
+        return out
+
+    A, B = by_domain(prev_geom), by_domain(new_geom)
+    rank = {"topology": 3, "shape": 2, "parameter": 1}
+    found = []  # (rank, domain, kind)
+
+    for dom in ("geometry", "doping", "stack", "electrode"):
+        pa, pb = A.get(dom, []), B.get(dom, [])
+        if not pa and not pb:
+            continue
+        if len(pa) != len(pb):
+            found.append((3, dom, "topology"))
+            continue
+        layers_a = sorted(p.layer for p in pa)
+        layers_b = sorted(p.layer for p in pb)
+        if layers_a != layers_b:
+            found.append((2, dom, "shape"))  # e.g. P -> P+ region, metal level moved
+            continue
+        props_a = [json_sorted(p.props) for p in pa]
+        props_b = [json_sorted(p.props) for p in pb]
+        geo_changed = any(not np.array_equal(np.round(x.points, 4), np.round(y.points, 4)) for x, y in zip(pa, pb))
+        props_changed = props_a != props_b
+        if dom == "geometry" and geo_changed:
+            kind = "shape" if _profile_shape_changed(prev_geom, new_geom, rasterize, np) else "parameter"
+            found.append((rank[kind], dom, kind))
+        elif geo_changed or props_changed:
+            # non-geometry domains: a changed dopant type / material is a shape change, numbers are parameters
+            kinds_a = [str(p.props.get("dopant", p.props.get("material", ""))) for p in pa]
+            kinds_b = [str(p.props.get("dopant", p.props.get("material", ""))) for p in pb]
+            kind = "shape" if kinds_a != kinds_b else "parameter"
+            found.append((rank[kind], dom, kind))
+
+    if len(prev_geom.ports) != len(new_geom.ports):
+        found.append((3, "geometry", "topology"))
+    if abs(prev_geom.thickness - new_geom.thickness) > 1e-6:
+        found.append((1, "stack", "parameter"))
+    if not found:
+        return "geometry:parameter"
+    found.sort(key=lambda t: (-t[0], ("geometry", "doping", "stack", "electrode").index(t[1])))
+    _, dom, kind = found[0]
+    return f"{dom}:{kind}"
+
+
+def json_sorted(d: dict) -> str:
+    import json
+
+    return json.dumps(d, sort_keys=True, default=str)
+
+
+def _profile_shape_changed(prev_geom, new_geom, rasterize, np) -> bool:
+    """True if the through-arm transition profile changed its *form* (not just its scale)."""
 
     def norm_profile(g):
         r = rasterize(g, 0.02, pad=0.0)
@@ -132,9 +217,6 @@ def classify_change(prev_geom, new_geom) -> str:
         x, w = x[sel], w[sel]
         if len(x) < 10:
             return None
-        # isolate the transition region (where the width is neither at its min nor its max)
-        # and compare its *normalised* shape, so scaling a taper's length or width is a
-        # parameter change while changing its profile family is a shape change
         span = w.max() - w.min()
         if span < 0.05:
             return np.zeros(100)
@@ -150,8 +232,8 @@ def classify_change(prev_geom, new_geom) -> str:
 
     a, b = norm_profile(prev_geom), norm_profile(new_geom)
     if a is None or b is None:
-        return "parameter"
-    return "shape" if np.abs(a - b).max() > 0.08 else "parameter"
+        return False
+    return bool(np.abs(a - b).max() > 0.08)
 
 
 # ----------------------------------------------------------------------------
@@ -343,7 +425,7 @@ class Agent:
             entry["change_type_auto"] = classify_change(prev_geom, geom)
         except Exception as e:  # noqa: BLE001 - descriptive only
             entry["change_type_auto"] = f"error: {str(e)[:60]}"
-        if turn.change_type == "unspecified" and entry["change_type_auto"] in CHANGE_TYPES:
+        if turn.change_type == "unspecified" and ":" in str(entry["change_type_auto"]):
             entry["change_type"] = entry["change_type_auto"]
         exp.write("design.py", turn.code)
         exp.snapshot(iteration)

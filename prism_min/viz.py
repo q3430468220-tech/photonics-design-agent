@@ -44,9 +44,11 @@ def plot_geometry(geom: Geometry, path: Path, title: str = "") -> Path:
 # Evolution chart
 # ----------------------------------------------------------------------------
 
-# marker encodes WHAT KIND of change the agent made; colour encodes the outcome
+# marker = KIND of change (parameter / shape / topology); fill colour = outcome (kept / discarded);
+# edge colour of kept points = DOMAIN (geometry / doping / stack / electrode); non-geometry
+# domains are also written as a prefix in the label ("doping | raise p to 1e18").
 MARKERS = {"baseline": "o", "parameter": "o", "shape": "s", "topology": "D", "unspecified": "o", "none": "o"}
-TYPE_LABEL = {"parameter": "parameter change", "shape": "shape change (same elements)", "topology": "topology change (elements added/replaced)"}
+DOMAIN_EDGE = {"geometry": "black", "doping": "#6a1b9a", "stack": "#e65100", "electrode": "#795548", "other": "#555555"}
 KEEP_COLOR = "#1b7f5a"
 DISCARD_COLOR = "#c0392b"
 VOID_COLOR = "#8e8e8e"
@@ -70,13 +72,20 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    xs, ys, kinds, decisions, labels, iters = [], [], [], [], [], []
+    from .agent import split_change_type
+
+    xs, ys, kinds, domains, decisions, labels, iters = [], [], [], [], [], [], []
     for i, e in enumerate(sims, start=1):
+        dom, kind = split_change_type(e.get("change_type") or "unspecified")
         xs.append(i)
         ys.append(e.get("fom"))
-        kinds.append(e.get("change_type") or "unspecified")
+        kinds.append(kind)
+        domains.append(dom)
         decisions.append(e.get("decision") if e.get("valid") else "void")
-        labels.append(e.get("label") or (e.get("change") or "")[:40])
+        lab = e.get("label") or (e.get("change") or "")[:40]
+        if dom not in ("geometry",) and kind not in ("baseline", "unspecified"):
+            lab = f"{dom} | {lab}"
+        labels.append(lab)
         iters.append(e["iteration"])
 
     # model turns: position between the experiments they fall between
@@ -107,13 +116,14 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
     if best_x:
         ax.step(best_x, best_y, where="post", color=KEEP_COLOR, lw=2, zorder=2, label="best so far")
 
-    for x, y, k, d in zip(xs, ys, kinds, decisions):
+    for x, y, k, dom, d in zip(xs, ys, kinds, domains, decisions):
         m = MARKERS.get(k, "o")
         if d == "void":
             ax.scatter([x], [void_y], marker="x", s=46, color=VOID_COLOR, zorder=3)
             continue
         if d == "keep":
-            ax.scatter([x], [y], marker=m, s=58, facecolor=KEEP_COLOR, edgecolor="black", lw=0.6, zorder=4)
+            edge = DOMAIN_EDGE.get(dom, "black")
+            ax.scatter([x], [y], marker=m, s=58, facecolor=KEEP_COLOR, edgecolor=edge, lw=0.8 if edge == "black" else 1.8, zorder=4)
         else:
             ax.scatter([x], [y], marker=m, s=46, facecolor="none", edgecolor=DISCARD_COLOR, lw=1.3, zorder=3)
 
@@ -178,6 +188,10 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
         Line2D([], [], marker="D", ls="", markerfacecolor="#dddddd", markeredgecolor="black", label="topology change (elements added/replaced)"),
         Line2D([], [], color=MODEL_COLOR, ls="--", label="model.py revised"),
     ]
+    used_domains = {dom for dom, d in zip(domains, decisions) if d == "keep" and dom != "geometry"}
+    for dom in ("doping", "stack", "electrode", "other"):
+        if dom in used_domains:
+            handles.append(Line2D([], [], marker="o", ls="", markerfacecolor=KEEP_COLOR, markeredgecolor=DOMAIN_EDGE[dom], markeredgewidth=1.8, label=f"{dom} change (edge colour)"))
     ax.legend(handles=handles, fontsize=7.5, loc="upper right", ncol=2, framealpha=0.9).set_zorder(6)
     fig.tight_layout()
     fig.savefig(path)

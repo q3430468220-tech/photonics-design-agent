@@ -123,22 +123,44 @@ class TestParse(unittest.TestCase):
 
     def test_parse_change_type_and_label(self):
         t = parse_turn(turn("h", "c", "design.py", "x = 1", change_type="topology", label="add MMI section (self-imaging)"), "design.py")
-        self.assertEqual(t.change_type, "topology")
+        self.assertEqual(t.change_type, "geometry:topology")  # bare kind defaults to geometry
         self.assertEqual(t.label, "add MMI section (self-imaging)")
+        t = parse_turn(turn("h", "c", "design.py", "x = 1", change_type="doping:parameter"), "design.py")
+        self.assertEqual(t.change_type, "doping:parameter")
+        t = parse_turn(turn("h", "c", "design.py", "x = 1", change_type="Electrode / topology"), "design.py")
+        self.assertEqual(t.change_type, "electrode:topology")
         t = parse_turn(turn("h", "widen the junction to 2 um", "design.py", "x = 1", change_type="nonsense", label=""), "design.py")
         self.assertEqual(t.change_type, "unspecified")
         self.assertTrue(t.label.startswith("widen the junction"))
         text = "### HYPOTHESIS\nh\n### CHANGE\nc\n### CHANGE TYPE: shape\n### FILE design.py\n```python\nx=1\n```\n"
-        self.assertEqual(parse_turn(text, "design.py").change_type, "shape")
+        self.assertEqual(parse_turn(text, "design.py").change_type, "geometry:shape")
 
-    def test_classify_change(self):
+    def test_classify_change_geometry(self):
         from prism_min.agent import classify_change
 
         self.assertEqual(classify_change(None, plain()), "baseline")
         self.assertEqual(classify_change(plain(), plain()), "none")
-        self.assertEqual(classify_change(plain(), tapered()), "topology")  # more polygons
-        self.assertEqual(classify_change(tapered(L=9, wc=2.5, Lt=6), tapered(L=13, wc=2.5, Lt=10)), "parameter")
-        self.assertEqual(classify_change(tapered(L=13, wc=2.5, Lt=10), tapered(L=13, wc=2.5, Lt=10, shape="par")), "shape")
+        self.assertEqual(classify_change(plain(), tapered()), "geometry:topology")  # more polygons
+        self.assertEqual(classify_change(tapered(L=9, wc=2.5, Lt=6), tapered(L=13, wc=2.5, Lt=10)), "geometry:parameter")
+        self.assertEqual(classify_change(tapered(L=13, wc=2.5, Lt=10), tapered(L=13, wc=2.5, Lt=10, shape="par")), "geometry:shape")
+
+    def test_classify_change_doping_and_electrode(self):
+        from prism_min.agent import classify_change
+        from prism_min.geometry import Geometry, rect
+
+        g0 = plain()
+        pn = [rect(-2, -1.5, 0, 1.5, "P", {"doping": 1e18, "dopant": "p"}), rect(0, -1.5, 2, 1.5, "N", {"doping": 1e18, "dopant": "n"})]
+        g1 = Geometry(g0.polygons + pn, g0.ports)
+        g_conc = Geometry(g0.polygons + [rect(-2, -1.5, 0, 1.5, "P", {"doping": 5e17, "dopant": "p"}), pn[1]], g0.ports)
+        g_off = Geometry(g0.polygons + [rect(-2, -1.5, -0.1, 1.5, "P", {"doping": 1e18, "dopant": "p"}), pn[1]], g0.ports)
+        g_pp = Geometry(g1.polygons + [rect(-4, -1.5, -2, 1.5, "P+", {"doping": 1e20, "dopant": "p"})], g0.ports)
+        g_m = Geometry(g1.polygons + [rect(-5, 2, -3, 3, "M1", {"material": "Al"})], g0.ports)
+        self.assertEqual(classify_change(g0, g1), "doping:topology")
+        self.assertEqual(classify_change(g1, g_conc), "doping:parameter")
+        self.assertEqual(classify_change(g1, g_off), "doping:parameter")
+        self.assertEqual(classify_change(g1, g_pp), "doping:topology")
+        self.assertEqual(classify_change(g1, g_m), "electrode:topology")
+        self.assertNotEqual(g1.hash(), g_conc.hash(), "props must be part of the geometry hash")
 
     def test_parse_tolerant_headings(self):
         text = "Some preamble\n## HYPOTHESIS\nh\n### CHANGE: c\n### FILE: `design.py`\n```py\nx=2\n```\n"

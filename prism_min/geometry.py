@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -48,10 +49,40 @@ class Port:
         return Port(d["name"], (d["center"][0], d["center"][1]), d["width"], d["orientation"])
 
 
+# layer-name prefixes used to assign a polygon to a design "domain" (for change classification)
+DOMAIN_PREFIXES = {
+    "doping": ("P", "N", "PP", "NN", "P+", "N+", "P++", "N++", "DOP", "IMPL"),
+    "electrode": ("M", "METAL", "VIA", "HEATER", "TIN", "AL", "AU", "CONTACT", "ELEC"),
+    "stack": ("SLAB", "RIB", "ETCH", "PARTIAL", "CLAD", "BOX"),
+}
+
+
+def layer_domain(layer: str) -> str:
+    """geometry | doping | electrode | stack, from the layer name (case-insensitive prefix match)."""
+    L = layer.upper()
+    if re.match(r"^M\d+", L) or re.match(r"^MH\b", L):  # M1, M2, MH ... metal levels
+        return "electrode"
+    for dom, prefixes in DOMAIN_PREFIXES.items():
+        for pre in prefixes:
+            if L == pre or L.startswith(pre + "_") or L.startswith(pre + "-") or (dom == "doping" and L in ("P", "N")):
+                return dom
+    return "geometry"
+
+
 @dataclass
 class Polygon:
+    """A polygon on a named layer with optional physical properties.
+
+    `props` carries non-geometric parameters of the region, e.g.
+        {"doping": 1e18, "dopant": "p"}         for an implant window
+        {"etch_depth": 0.07}                     for a partial-etch region
+        {"material": "TiN", "thickness": 0.11}   for a heater
+    They are part of the geometry hash and of the change classification.
+    """
+
     points: np.ndarray  # (N, 2)
     layer: str = "WG"
+    props: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         pts = np.asarray(self.points, dtype=float)
@@ -73,12 +104,19 @@ class Polygon:
             float(self.points[:, 1].max()),
         )
 
+    @property
+    def domain(self) -> str:
+        return layer_domain(self.layer)
+
     def to_dict(self) -> dict:
-        return {"layer": self.layer, "points": np.round(self.points, 6).tolist()}
+        d = {"layer": self.layer, "points": np.round(self.points, 6).tolist()}
+        if self.props:
+            d["props"] = self.props
+        return d
 
     @staticmethod
     def from_dict(d: dict) -> "Polygon":
-        return Polygon(np.asarray(d["points"], dtype=float), d.get("layer", "WG"))
+        return Polygon(np.asarray(d["points"], dtype=float), d.get("layer", "WG"), dict(d.get("props", {})))
 
 
 @dataclass
@@ -126,7 +164,7 @@ class Geometry:
         """Stable identity of the geometry (coordinates rounded to 0.1 nm)."""
         payload = {
             "t": round(float(self.thickness), 4),
-            "polys": [[p.layer, np.round(p.points, 4).tolist()] for p in self.polygons],
+            "polys": [[p.layer, np.round(p.points, 4).tolist(), json.dumps(p.props, sort_keys=True, default=str)] for p in self.polygons],
             "ports": [p.to_dict() for p in self.ports],
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
@@ -137,8 +175,14 @@ class Geometry:
 # ----------------------------------------------------------------------------
 
 
-def rect(x0: float, y0: float, x1: float, y1: float, layer: str = "WG") -> Polygon:
-    return Polygon(np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]), layer)
+def rect(x0: float, y0: float, x1: float, y1: float, layer: str = "WG", props: Optional[Dict] = None) -> Polygon:
+    return Polygon(np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]), layer, dict(props or {}))
+
+
+def region(points, layer: str, **props) -> Polygon:
+    """Polygon on a non-waveguide layer with physical properties, e.g.
+    region(pts, "P", doping=1e18, dopant="p")   or   region(pts, "M1", material="Al")."""
+    return Polygon(np.asarray(points, float), layer, dict(props))
 
 
 def straight(length: float, width: float, center=(0.0, 0.0), angle: float = 0.0, layer: str = "WG") -> Polygon:
