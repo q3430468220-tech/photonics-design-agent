@@ -32,6 +32,9 @@ from .llm import LLM, LLMError
 # ----------------------------------------------------------------------------
 
 
+CHANGE_TYPES = ("parameter", "shape", "topology", "model")
+
+
 @dataclass
 class Turn:
     hypothesis: str
@@ -41,6 +44,8 @@ class Turn:
     code: str
     laws: List[str]
     raw: str
+    change_type: str = "unspecified"
+    label: str = ""
 
 
 class ParseError(ValueError):
@@ -80,6 +85,13 @@ def parse_turn(text: str, expected_file: str) -> Turn:
         s = line.strip()
         if s.startswith(("-", "*")) and s.lower() not in ("- none", "* none"):
             laws.append(s.lstrip("-* ").strip())
+    ct_arg, ct_body = sections.get("CHANGE TYPE", (None, ""))
+    ct = (ct_arg or ct_body or "").strip().strip("`*").lower().split()
+    change_type = ct[0] if ct and ct[0] in CHANGE_TYPES else "unspecified"
+    lb_arg, lb_body = sections.get("LABEL", (None, ""))
+    label = (lb_body or lb_arg or "").strip().strip("`*\"'").splitlines()[0].strip() if (lb_body or lb_arg) else ""
+    if not label:
+        label = sections["CHANGE"][1].strip().replace("\n", " ")[:48]
     return Turn(
         hypothesis=sections["HYPOTHESIS"][1],
         change=sections["CHANGE"][1],
@@ -88,7 +100,58 @@ def parse_turn(text: str, expected_file: str) -> Turn:
         code=code,
         laws=laws,
         raw=text,
+        change_type=change_type,
+        label=label[:60],
     )
+
+
+def classify_change(prev_geom, new_geom) -> str:
+    """Runner-side cross-check of the declared change type from the geometry diff.
+
+    topology  : different number of polygons or ports
+    shape     : same element count but the through-arm width profile changed its *form*
+                (sampled profile, normalised to the same start/end widths, differs)
+    parameter : same form, only scale/numbers differ
+    none      : identical geometry
+    """
+    import numpy as np
+
+    from .geometry import rasterize
+
+    if prev_geom is None:
+        return "baseline"
+    if prev_geom.hash() == new_geom.hash():
+        return "none"
+    if len(prev_geom.polygons) != len(new_geom.polygons) or len(prev_geom.ports) != len(new_geom.ports):
+        return "topology"
+
+    def norm_profile(g):
+        r = rasterize(g, 0.02, pad=0.0)
+        x, w = r.run_profile_x(0.0)
+        sel = (x > 0) & (w > 0) & (w < 2 * x)  # outside the junction (see features.crossing_features)
+        x, w = x[sel], w[sel]
+        if len(x) < 10:
+            return None
+        # isolate the transition region (where the width is neither at its min nor its max)
+        # and compare its *normalised* shape, so scaling a taper's length or width is a
+        # parameter change while changing its profile family is a shape change
+        span = w.max() - w.min()
+        if span < 0.05:
+            return np.zeros(100)
+        inside = (w > w.min() + 0.1 * span) & (w < w.max() - 0.1 * span)
+        if inside.sum() < 5:
+            return np.zeros(100)
+        i0, i1 = np.argmax(inside), len(inside) - np.argmax(inside[::-1]) - 1
+        xt, wt = x[i0 : i1 + 1], w[i0 : i1 + 1]
+        u = (xt - xt.min()) / max(xt.max() - xt.min(), 1e-9)
+        xi = np.linspace(0, 1, 100)
+        wi = np.interp(xi, u, wt)
+        return (wi - wi.min()) / max(wi.max() - wi.min(), 1e-9)
+
+    a, b = norm_profile(prev_geom), norm_profile(new_geom)
+    if a is None or b is None:
+        return "parameter"
+    return "shape" if np.abs(a - b).max() > 0.08 else "parameter"
 
 
 # ----------------------------------------------------------------------------
@@ -122,6 +185,16 @@ class Agent:
             done += 1
 
     def step(self) -> dict:
+        out = self._step()
+        try:
+            from .viz import plot_evolution
+
+            plot_evolution(self.journal.entries(), self.exp.dir / "evolution.png", self.cfg)
+        except Exception as e:  # noqa: BLE001 - plotting must never break the loop
+            self.log(f"  (evolution plot skipped: {e})")
+        return out
+
+    def _step(self) -> dict:
         iteration = self.journal.next_iteration()
         if not self.journal.entries():
             self.log("\n=== iteration 1 | BASELINE | measuring the initial design.py")
@@ -137,7 +210,7 @@ class Agent:
         """Measure the human-provided starting design so the agent reasons from data."""
         exp, cfg = self.exp, self.cfg
         entry = {"iteration": iteration, "mode": "baseline", "mode_reason": "initial design.py", "valid": False, "sim_spent": False,
-                 "hypothesis": "baseline measurement of the starting design", "change": "none (initial design.py)"}
+                 "hypothesis": "baseline measurement of the starting design", "change": "none (initial design.py)", "change_type": "baseline", "label": "baseline"}
         try:
             geom = exp.build_design()
             exp.snapshot(iteration)
@@ -251,7 +324,7 @@ class Agent:
             self.journal.append(entry)
             self.log(f"  LLM/parse failure: {e}")
             return entry
-        entry.update(hypothesis=turn.hypothesis, change=turn.change, expected=turn.expected)
+        entry.update(hypothesis=turn.hypothesis, change=turn.change, expected=turn.expected, change_type=turn.change_type, label=turn.label)
         self._save_raw(iteration, text)
 
         # 2. build candidate
@@ -262,6 +335,16 @@ class Agent:
             self.journal.append(entry)
             self.log(f"  build failed: {e}")
             return entry
+        try:
+            prev_geom = exp.build_design(prev_design)
+        except DesignError:
+            prev_geom = None
+        try:
+            entry["change_type_auto"] = classify_change(prev_geom, geom)
+        except Exception as e:  # noqa: BLE001 - descriptive only
+            entry["change_type_auto"] = f"error: {str(e)[:60]}"
+        if turn.change_type == "unspecified" and entry["change_type_auto"] in CHANGE_TYPES:
+            entry["change_type"] = entry["change_type_auto"]
         exp.write("design.py", turn.code)
         exp.snapshot(iteration)
         entry["design_hash"] = geom.hash()
@@ -358,7 +441,7 @@ class Agent:
             self.journal.append(entry)
             self.log(f"  LLM/parse failure: {e}")
             return entry
-        entry.update(hypothesis=turn.hypothesis, change=turn.change, expected=turn.expected)
+        entry.update(hypothesis=turn.hypothesis, change=turn.change, expected=turn.expected, change_type="model", label=turn.label or "model revised")
         self._save_raw(iteration, text)
 
         # the candidate model must import and predict the current geometry and all past scored ones

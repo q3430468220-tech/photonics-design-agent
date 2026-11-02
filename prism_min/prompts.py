@@ -31,6 +31,19 @@ Which loss term dominates in the latest measurement, what mechanism causes it, a
 ### CHANGE
 One or two sentences stating the concrete geometric (or model) change.
 
+### CHANGE TYPE
+Exactly one word:
+  parameter  - same structure, only numbers changed (a width, a length, a radius)
+  shape      - same elements, a different curve/profile family (linear -> parabolic taper, arc -> Euler bend)
+  topology   - elements added, removed or replaced (add an MMI section, add subwavelength gratings, split a taper in two)
+  model      - (model turns only)
+The runner cross-checks this against the geometry diff and the evolution plot is annotated with it.
+
+### LABEL
+A 3-8 word label for the evolution plot saying WHAT you did and WHY, e.g.
+"widen junction 0.5->1.5 um (less diffraction)", "linear->parabolic taper (adiabatic)",
+"add MMI section (self-imaging)". No full sentences.
+
 ### EXPECTED
 Your own quantitative expectation in words (e.g. "IL 1.08 -> ~0.4 dB, crosstalk -10 -> ~-18 dB").
 This is for the record; the registered number comes from model.py.

@@ -95,6 +95,22 @@ prism status experiments/my_crossing
 prism review experiments/my_crossing     # fresh-session audit of laws.md vs the journal
 ```
 
+## The evolution chart: *what* the agent did, not just how far it got
+
+`evolution.png` is refreshed after every iteration (`prism plot <dir>` regenerates it):
+
+![evolution](examples/demo_evolution.png)
+
+Every point is one simulation. The marker shape is the **kind of change** the agent declared
+(and the runner cross-checks from the geometry diff): circle = parameter change, square = shape
+change (same elements, different profile family, e.g. linear → parabolic taper, arc → Euler bend),
+diamond = topology change (elements added or replaced, e.g. add an MMI section). Green = kept,
+red = discarded, grey × = voided (closure failed). Each kept point carries the agent's own 3–8
+word label of *what it did and why* ("widen junction 1.5→2.5 µm (less diffraction)"); jumps
+larger than 15 % are bold with the gain in dB. Dashed blue lines mark where `model.py` was
+revised. The chart therefore answers, at a glance, which *method* bought each improvement and
+which plateaus were parameter polishing versus failed structural ideas.
+
 ## The experiment folder
 
 | file | written by | purpose |
@@ -104,7 +120,8 @@ prism review experiments/my_crossing     # fresh-session audit of laws.md vs the
 | `design.py` | agent (design turns) | `build() -> Geometry` using `prism_min.geometry` helpers |
 | `model.py` | agent (model turns) | `predict(geom) -> {fom, sigma, breakdown?, notes}` — the agent's understanding, as code |
 | `laws.md` | agent (append-only) | lessons tagged `[prior]` / `[tentative]` / `[confirmed]`, with iteration numbers |
-| `journal.jsonl`, `journal.md` | runner | one record per iteration: hypothesis, change, prediction, measurement, breakdown, decision |
+| `journal.jsonl`, `journal.md` | runner | one record per iteration: hypothesis, change, change type (declared + auto), label, prediction, measurement, breakdown, decision |
+| `evolution.png` | runner | annotated FOM-vs-experiment chart (see above) |
 | `runs/iter_NNN/` | runner | snapshots of `design.py`/`model.py`, raw LLM response, `sim_result.json`, `eval.json`, plots |
 | `best/design.py` | runner | the best kept design (also what `design.py` is restored to after a revert) |
 
@@ -177,10 +194,11 @@ prism_min/            (package + CLI keep the method name: `prism ...`)
   llm.py          Anthropic / OpenAI-compatible / scripted providers (requests only)
   prompts.py      system prompt, design turn, model turn, review
   agent.py        the loop: mode decision, calibration, design/model turns, keep/revert, laws
-  cli.py          prism init | check | eval | run | status | review
+  viz.py          geometry preview + annotated evolution chart
+  cli.py          prism init | check | eval | run | status | plot | review
 experiments/soi_crossing/   template: 220 nm SOI crossing, IL < 0.06 dB target
 examples/demo_scripted.py   offline demonstration
-tests/                      24 unit + integration tests (python -m unittest discover -s tests -t .)
+tests/                      26 unit + integration tests (python -m unittest discover -s tests -t .)
 ```
 
 ## How to evaluate whether PRISM-Min is actually better

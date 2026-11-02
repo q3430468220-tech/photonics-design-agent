@@ -53,12 +53,18 @@ def design_source(L, wc, Lt, straight=1.0, shape="linear"):
     return DESIGN_TEMPLATE.format(L=L, wc=wc, Lt=Lt, straight=straight, shape=shape)
 
 
-def turn(hypothesis, change, filename, code, laws="none", expected="see change"):
+def turn(hypothesis, change, filename, code, laws="none", expected="see change", change_type="parameter", label=""):
     return f"""### HYPOTHESIS
 {hypothesis}
 
 ### CHANGE
 {change}
+
+### CHANGE TYPE
+{change_type}
+
+### LABEL
+{label}
 
 ### EXPECTED
 {expected}

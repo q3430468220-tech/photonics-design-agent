@@ -5,6 +5,7 @@
     prism eval  <dir> --manual [--backend mock]   one human-triggered simulation (guard bypassed)
     prism run   <dir> [--iters N] [--sims N]      run the agent loop
     prism status <dir>                            journal summary
+    prism plot   <dir> [--log] [--all-labels]     evolution chart (also refreshed after every iteration)
     prism review <dir>                            fresh-session audit of laws.md + journal
 
 .env in the current directory or the repo root is loaded if present.
@@ -141,6 +142,16 @@ def cmd_status(a):
     print(f"journal: {j.md}")
 
 
+def cmd_plot(a):
+    from .experiment import Experiment
+    from .journal import Journal
+    from .viz import plot_evolution
+
+    exp = Experiment(a.dir)
+    out = plot_evolution(Journal(exp.dir).entries(), exp.dir / (a.out or "evolution.png"), exp.config, log_y=a.log, label_discarded=a.all_labels)
+    print("no simulations in the journal yet" if out is None else f"saved {out}")
+
+
 def cmd_review(a):
     from . import prompts
     from .experiment import Experiment
@@ -194,6 +205,13 @@ def main(argv=None):
     s = sub.add_parser("status", help="journal summary")
     s.add_argument("dir")
     s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("plot", help="evolution chart: FOM vs experiment, annotated with what the agent changed")
+    s.add_argument("dir")
+    s.add_argument("--out", default=None, help="file name inside the experiment dir (default evolution.png)")
+    s.add_argument("--log", action="store_true", help="log y axis")
+    s.add_argument("--all-labels", action="store_true", help="label discarded points too")
+    s.set_defaults(fn=cmd_plot)
 
     s = sub.add_parser("review", help="fresh-session audit of laws.md against the journal")
     s.add_argument("dir")

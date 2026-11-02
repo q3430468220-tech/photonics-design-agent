@@ -64,6 +64,19 @@ prism status experiments/my_crossing
 prism review experiments/my_crossing   # 开一个干净会话审计 laws.md 和日志
 ```
 
+## 进化图：看出 agent 用了什么方法
+
+`evolution.png` 每轮迭代后自动刷新（`prism plot <dir>` 可重新生成）：
+
+![evolution](examples/demo_evolution.png)
+
+每个点是一次仿真。标记形状是 agent 声明的**改动类型**（运行器会用几何差异交叉核对）：圆 = 参数调整，
+方 = 形状改变（元素相同、profile 族不同，如线性→抛物线 taper、圆弧→欧拉弯曲），菱形 = 拓扑改变（增加或
+替换元素，如加 MMI 段）。绿 = 保留，红 = 丢弃，灰 × = 作废（闭合失败）。每个保留点标注 agent 自己写的
+3–8 个词的"做了什么、为什么"（如 "widen junction 1.5→2.5 µm (less diffraction)"）；超过 15% 的跳变加粗并
+标出增益。蓝色虚线是 model.py 被修改的位置。这样一眼就能看出每次性能提升是哪种方法带来的，哪些平台期是
+参数微调、哪些是失败的结构尝试。
+
 ## 实验文件夹
 
 | 文件 | 谁写 | 作用 |
@@ -73,7 +86,8 @@ prism review experiments/my_crossing   # 开一个干净会话审计 laws.md 和
 | `design.py` | agent（设计轮） | `build() -> Geometry`，用 `prism_min.geometry` 的辅助函数 |
 | `model.py` | agent（模型轮） | `predict(geom) -> {fom, sigma, breakdown?, notes}`，agent 的物理理解 |
 | `laws.md` | agent（只追加） | 标注 `[prior]` / `[tentative]` / `[confirmed]` 的规律，带迭代号 |
-| `journal.jsonl`、`journal.md` | 运行器 | 每轮一条：假设、修改、预测、实测、分解、决定 |
+| `journal.jsonl`、`journal.md` | 运行器 | 每轮一条：假设、修改、改动类型（声明 + 自动）、标签、预测、实测、分解、决定 |
+| `evolution.png` | 运行器 | 带方法标注的 FOM–实验次数进化图（见上） |
 | `runs/iter_NNN/` | 运行器 | design.py / model.py 快照、LLM 原始回复、仿真数据、评估结果、图 |
 | `best/design.py` | 运行器 | 当前最优设计（回滚时恢复到它） |
 

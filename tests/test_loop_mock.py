@@ -115,6 +115,12 @@ class TestLoop(unittest.TestCase):
         self.assertIn("parabolic taper", laws)
         self.assertTrue((self.tmp / "journal.md").exists())
         self.assertTrue((self.tmp / "runs" / "iter_005" / "design.py").exists())
+        # change-type bookkeeping and the evolution chart
+        self.assertEqual(es[0]["change_type"], "baseline")
+        self.assertEqual(es[1]["change_type_auto"], "topology")  # plain -> tapered adds polygons
+        self.assertEqual(es[2]["change_type"], "model")
+        self.assertIn(es[4]["change_type_auto"], ("shape", "parameter", "topology"))
+        self.assertTrue((self.tmp / "evolution.png").exists())
         # the model turn must have seen the calibration table and the history
         model_prompt = llm.calls[1]["user"]
         self.assertIn("MODE: MODEL TURN", model_prompt)

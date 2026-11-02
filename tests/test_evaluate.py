@@ -121,6 +121,25 @@ class TestParse(unittest.TestCase):
         with self.assertRaises(ParseError):
             parse_turn(turn("h", "c", "model.py", "x = 1"), "design.py")
 
+    def test_parse_change_type_and_label(self):
+        t = parse_turn(turn("h", "c", "design.py", "x = 1", change_type="topology", label="add MMI section (self-imaging)"), "design.py")
+        self.assertEqual(t.change_type, "topology")
+        self.assertEqual(t.label, "add MMI section (self-imaging)")
+        t = parse_turn(turn("h", "widen the junction to 2 um", "design.py", "x = 1", change_type="nonsense", label=""), "design.py")
+        self.assertEqual(t.change_type, "unspecified")
+        self.assertTrue(t.label.startswith("widen the junction"))
+        text = "### HYPOTHESIS\nh\n### CHANGE\nc\n### CHANGE TYPE: shape\n### FILE design.py\n```python\nx=1\n```\n"
+        self.assertEqual(parse_turn(text, "design.py").change_type, "shape")
+
+    def test_classify_change(self):
+        from prism_min.agent import classify_change
+
+        self.assertEqual(classify_change(None, plain()), "baseline")
+        self.assertEqual(classify_change(plain(), plain()), "none")
+        self.assertEqual(classify_change(plain(), tapered()), "topology")  # more polygons
+        self.assertEqual(classify_change(tapered(L=9, wc=2.5, Lt=6), tapered(L=13, wc=2.5, Lt=10)), "parameter")
+        self.assertEqual(classify_change(tapered(L=13, wc=2.5, Lt=10), tapered(L=13, wc=2.5, Lt=10, shape="par")), "shape")
+
     def test_parse_tolerant_headings(self):
         text = "Some preamble\n## HYPOTHESIS\nh\n### CHANGE: c\n### FILE: `design.py`\n```py\nx=2\n```\n"
         t = parse_turn(text, "design.py")
