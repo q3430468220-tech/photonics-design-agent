@@ -13,7 +13,39 @@ from typing import List
 
 
 @dataclass
+class ActiveConfig:
+    """Settings of the `pn_phase_shifter` family (2D x-z cross-section, CHARGE + FDE)."""
+
+    wavelength: float = 1.55  # um
+    core_height: float = 0.22  # um, full silicon thickness
+    slab_height: float = 0.09  # um, partial-etch slab
+    v_list: List[float] = field(default_factory=lambda: [0.0, -0.5, -1.0, -1.5, -2.0, -3.0])  # anode bias, reverse < 0
+    v_ref: float = -2.0  # VpiL, alpha, C are reported at this bias (secant from 0 V)
+    norm_length_um: float = 1000.0  # CHARGE normalisation length (per-length quantities are independent of it)
+    # electrical / optical settings (LOCKED)
+    charge_mesh_edge_um: float = 0.02  # max edge length in the junction region
+    fde_mesh_dx: float = 0.01
+    fde_mesh_dz: float = 0.005
+    fde_span_x: float = 6.0  # um, FDE window width centred on the rib
+    fde_span_z: float = 3.0
+    # DRC-like rules for the cross-section
+    min_contact_to_rib: float = 0.6  # um, metal contact edge to rib sidewall
+    min_pp_to_rib: float = 0.4  # um, P++/N++ edge to rib sidewall
+    max_half_width: float = 6.0  # um, cross-section half extent
+    # FOM / constraints
+    fom_description: str = "VpiL x alpha (V dB) at v_ref: phase-shifter efficiency-loss product, lower is better"
+    max_alpha_db_cm: float = 25.0  # at v_ref
+    max_vpil_vcm: float = 3.0
+    min_f_rc_ghz: float = 40.0
+    improve_threshold_rel: float = 0.02  # 'Better?' must improve the FOM by > 2 %
+
+
+@dataclass
 class SimConfig:
+    # ---- device family -------------------------------------------------------
+    device_family: str = "passive_4port"  # passive_4port | pn_phase_shifter
+    active: ActiveConfig = field(default_factory=ActiveConfig)
+
     # ---- physics / band ----------------------------------------------------
     wl_min: float = 1.53  # um
     wl_max: float = 1.57
@@ -86,6 +118,16 @@ class SimConfig:
 
     def summary_for_agent(self) -> str:
         """Human-readable summary shown to the agent (read-only)."""
+        if self.device_family == "pn_phase_shifter":
+            a = self.active
+            return (
+                f"family pn_phase_shifter (2D x-z cross-section, CHARGE + FDE); lambda {a.wavelength} um, TE; "
+                f"Si core {a.core_height*1000:.0f} nm, slab {a.slab_height*1000:.0f} nm, SiO2 clad; anode bias list {a.v_list} V "
+                f"(reverse < 0), reported at v_ref = {a.v_ref} V; rules: contact >= {a.min_contact_to_rib} um and P++/N++ >= {a.min_pp_to_rib} um "
+                f"from the rib sidewall, half extent <= {a.max_half_width} um, all polygons axis-aligned rectangles; "
+                f"FOM = {a.fom_description}; constraints: alpha <= {a.max_alpha_db_cm} dB/cm, VpiL <= {a.max_vpil_vcm} V cm, "
+                f"f_RC >= {a.min_f_rc_ghz} GHz; keep only if FOM improves by > {100*a.improve_threshold_rel:.0f} %; budget {self.max_sims} sims."
+            )
         return (
             f"band {self.wl_min}-{self.wl_max} um ({self.n_wl} pts), {self.polarization}, "
             f"{self.thickness*1000:.0f} nm core (n={self.core_index}) in n={self.clad_index} cladding; "

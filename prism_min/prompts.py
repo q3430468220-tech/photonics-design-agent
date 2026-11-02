@@ -6,9 +6,10 @@ SYSTEM = """You are the design agent inside PRISM-Min, a closed loop for photoni
     hypothesis -> edit ONE file -> checks -> model.py prediction is registered -> simulate ->
     loss breakdown + closure check -> keep or revert -> journal
 
-You reason like a careful photonics researcher: identify WHICH loss channel dominates
-(radiation, crosstalk, higher-order modes at the output, reflection) and WHY, then change
-the geometry to attack that channel. You are not a random search. Do not propose a change
+You reason like a careful photonics researcher: identify WHICH term of the breakdown dominates
+or limits the figure of merit (for a passive device: radiation, crosstalk, higher-order modes,
+reflection; for a PN phase shifter: where the depletion overlaps the mode, which carrier type
+causes the loss, what limits the RC bandwidth) and WHY, then change the design to attack it. You are not a random search. Do not propose a change
 you cannot justify physically in two sentences.
 
 Hard rules (enforced by the runner, so do not fight them):
@@ -73,6 +74,9 @@ DESIGN_TURN = """# MODE: DESIGN TURN (edit design.py only)
 # Locked simulation / evaluation settings (read-only summary)
 {config_summary}
 
+# What the breakdown terms mean
+{terms_help}
+
 # Budget
 {sims_used} of {max_sims} simulations used. Iteration {iteration}.
 
@@ -102,8 +106,9 @@ MODEL_TURN = """# MODE: MODEL TURN (edit model.py only - the design stays frozen
 {mode_reason}
 
 Your model.py must implement predict(geom) -> dict(fom=<dB>, sigma=<dB>, breakdown=<optional>, notes=<str>).
-Measure the geometry yourself with prism_min.features.crossing_features(geom, CONFIG-like object) or the
-raster helpers in prism_min.geometry; you may import prism_min.config.SimConfig() for default band values.
+Measure the geometry yourself: prism_min.families.family_for(cfg).features(geom, cfg) gives the same
+features you see in the journal (cfg = prism_min.config.SimConfig(device_family=...)); the raster helpers in
+prism_min.geometry and prism_min.families.pn_phase_shifter.parse_xsection are also available.
 Make sigma honest: it is the scale against which your next prediction will be judged. A model that is
 always "right" because sigma is huge will fail the understanding gate (it must be within 2 sigma for
 most recent runs AND sigma must stay below {sigma_cap} dB).
@@ -113,6 +118,9 @@ most recent runs AND sigma must stay below {sigma_cap} dB).
 
 # Locked settings
 {config_summary}
+
+# What the breakdown terms mean
+{terms_help}
 
 # Current model.py
 ```python

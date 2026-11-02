@@ -49,9 +49,10 @@ def cmd_init(a):
 
 
 def cmd_check(a):
-    from .checks import format_violations, run_drc, sim_sanity
+    from .checks import format_violations, run_drc
     from .experiment import DesignError, Experiment
-    from .features import crossing_features, format_features
+    from .families import family_for
+    from .features import format_features
 
     exp = Experiment(a.dir)
     try:
@@ -59,10 +60,14 @@ def cmd_check(a):
     except DesignError as e:
         sys.exit(f"design.py: {e}")
     cfg = exp.config
-    print(f"design hash {geom.hash()}  config hash {cfg.hash()}  bbox {tuple(round(v, 3) for v in geom.bbox())}")
-    print("features:", format_features(crossing_features(geom, cfg)))
+    fam = family_for(cfg)
+    print(f"family {fam.name}  design hash {geom.hash()}  config hash {cfg.hash()}  bbox {tuple(round(v, 3) for v in geom.bbox())}")
+    try:
+        print("features:", format_features(fam.features(geom, cfg)))
+    except Exception as e:  # noqa: BLE001
+        print(f"features: (error: {e})")
     print("DRC:    ", format_violations(run_drc(geom, cfg)))
-    print("sanity: ", format_violations(sim_sanity(geom, cfg)))
+    print("checks: ", format_violations(fam.check(geom, cfg)))
     try:
         p = exp.predict(geom)
         print(f"model.py predicts FOM {p['fom']:.4f} +- {p['sigma']:.4f} dB  ({p.get('notes','')})")
@@ -81,8 +86,10 @@ def cmd_eval(a):
     from .experiment import Experiment
     from .journal import Journal
 
+    from .families import family_for
+
     exp = Experiment(a.dir)
-    backend = get_backend(a.backend)
+    backend = get_backend(a.backend or _default_backend(exp, a.real))
     try:
         it = a.iteration if a.iteration is not None else Journal(exp.dir).next_iteration()
         res = evaluate(exp, backend, it, manual=True)
@@ -92,7 +99,7 @@ def cmd_eval(a):
     if res.breakdown:
         from .agent import _table_from_dict
 
-        print(_table_from_dict(res.breakdown))
+        print(_table_from_dict(res.breakdown, exp.config))
     if res.checks:
         print("checks:", "; ".join(res.checks))
     print("run dir:", res.run_dir)
@@ -107,6 +114,7 @@ def cmd_run(a):
     from .llm import get_llm
 
     exp = Experiment(a.dir)
+    a.backend = a.backend or _default_backend(exp, a.real)
     provider = (a.provider or os.environ.get("PRISM_LLM_PROVIDER", "anthropic")).lower()
     if provider == "scripted":
         sys.exit("the scripted provider is for tests; run examples/demo_scripted.py for an offline demonstration")
@@ -123,6 +131,17 @@ def cmd_run(a):
     cmd_status(a)
 
 
+def _default_backend(exp, real: bool) -> str:
+    """Family default: the mock unless --real (or PRISM_BACKEND) says otherwise."""
+    from .families import family_for
+
+    env = os.environ.get("PRISM_BACKEND")
+    if env:
+        return env
+    fam = family_for(exp.config)
+    return fam.default_backends[0] if real else fam.default_backends[1]
+
+
 def cmd_status(a):
     from .journal import Journal
 
@@ -131,8 +150,7 @@ def cmd_status(a):
     print(f"{len(es)} iterations, {j.sims_used()} simulations spent")
     b = j.best()
     if b:
-        s = b["summary"]
-        print(f"best: iter {b['iteration']}  IL {b['fom']:.4f} dB  xtalk {s['crosstalk_worst_dB']:.1f} dB  refl {s['reflection_worst_dB']:.1f} dB  constraints {'ok' if b.get('constraints_ok') else 'violated'}")
+        print(f"best: iter {b['iteration']}  FOM {b['fom']:.4g}  {b.get('summary_text','')}  constraints {'ok' if b.get('constraints_ok') else 'violated'}")
     scored = j.scored()
     if scored:
         misses = [e["miss_sigma"] for e in scored if e.get("miss_sigma") is not None]
@@ -188,14 +206,16 @@ def main(argv=None):
 
     s = sub.add_parser("eval", help="one manual simulation of the current design.py")
     s.add_argument("dir")
-    s.add_argument("--backend", default=os.environ.get("PRISM_BACKEND", "mock"))
+    s.add_argument("--backend", default=None, help="mock | mock_pn | lumerical | lumerical_charge_fde (default: family mock, or family real with --real)")
+    s.add_argument("--real", action="store_true", help="use the family's real (Lumerical) backend")
     s.add_argument("--manual", action="store_true", required=True, help="acknowledge that the prediction guard is bypassed")
     s.add_argument("--iteration", type=int, default=None)
     s.set_defaults(fn=cmd_eval)
 
     s = sub.add_parser("run", help="run the agent loop")
     s.add_argument("dir")
-    s.add_argument("--backend", default=os.environ.get("PRISM_BACKEND", "mock"))
+    s.add_argument("--backend", default=None, help="mock | mock_pn | lumerical | lumerical_charge_fde (default: family mock, or family real with --real)")
+    s.add_argument("--real", action="store_true", help="use the family's real (Lumerical) backend")
     s.add_argument("--provider", default=None, help="anthropic | openai | scripted (default: PRISM_LLM_PROVIDER)")
     s.add_argument("--model", default=None)
     s.add_argument("--iters", type=int, default=None)

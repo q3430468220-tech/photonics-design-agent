@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from .backends.base import Backend
-from .checks import errors_only, format_violations, run_drc, sim_sanity
-from .decompose import decompose, fom_and_constraints
+from .checks import errors_only, format_violations, run_drc
 from .experiment import DesignError, Experiment
+from .families import family_for
 from .geometry import Geometry
 from .guard import GuardError, PredictionRegistry
 
@@ -48,16 +48,14 @@ class EvalResult:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    summary_text: str = ""
+
     def short(self) -> str:
         if not self.valid:
             return f"INVALID at {self.stage}: {self.reason}"
-        s = self.breakdown["summary"] if self.breakdown else {}
         ok = "ok" if self.constraints_ok else "VIOLATED: " + "; ".join(self.constraint_violations)
         miss = f", miss {self.miss_sigma:+.2f} sigma" if self.miss_sigma is not None else ""
-        return (
-            f"FOM(IL worst)={self.fom:.4f} dB @ {s.get('IL_worst_wl_um', 0):.3f} um; xtalk {s.get('crosstalk_worst_dB', 0):.1f} dB; "
-            f"refl {s.get('reflection_worst_dB', 0):.1f} dB; closure err {s.get('closure_err', 0):.4f}; constraints {ok}{miss}"
-        )
+        return f"FOM={self.fom:.4g}; {self.summary_text}; constraints {ok}{miss}"
 
 
 def evaluate(
@@ -70,6 +68,7 @@ def evaluate(
     run_dir: Optional[Path] = None,
 ) -> EvalResult:
     cfg = exp.config
+    fam = family_for(cfg)
     t0 = time.time()
     if run_dir is None:
         run_dir = exp.run_dir(iteration) if not manual else exp.runs / time.strftime("manual_%Y%m%d_%H%M%S")
@@ -87,7 +86,7 @@ def evaluate(
 
     # 2. checks
     res.stage = "checks"
-    viols = run_drc(geom, cfg) + sim_sanity(geom, cfg)
+    viols = run_drc(geom, cfg) + fam.check(geom, cfg)
     res.checks = [str(v) for v in viols]
     if errors_only(viols):
         res.reason = "DRC/sanity errors:\n" + format_violations(errors_only(viols))
@@ -120,8 +119,9 @@ def evaluate(
 
     # 5. decompose + closure
     res.stage = "closure"
-    bd = decompose(sim, cfg)
+    bd = fam.decompose(sim, cfg)
     res.breakdown = bd.to_dict()
+    res.summary_text = fam.summary_text(bd.summary())
     if not bd.closure_ok:
         res.reason = (
             f"closure failed: max|box_total-1| = {bd.closure_err:.4f} > {cfg.closure_tol}"
@@ -132,10 +132,11 @@ def evaluate(
 
     # 6. score
     res.stage = "scored"
-    fc = fom_and_constraints(bd, cfg)
+    fc = fam.fom_and_constraints(bd, cfg)
     res.fom = fc["fom"]
     res.constraints_ok = fc["constraints_ok"]
     res.constraint_violations = fc["constraint_violations"]
+    res.extra["violation_score"] = fc.get("violation_score", 0.0)
     res.valid = True
     p = res.prediction
     if p and p.get("fom") is not None and p.get("sigma"):

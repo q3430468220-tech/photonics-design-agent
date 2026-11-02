@@ -93,8 +93,12 @@ def register(name: str):
 def get_backend(name: str, **kw) -> Backend:
     from . import mock  # noqa: F401  (registers)
 
+    from . import mock_pn  # noqa: F401
+
     if name == "lumerical":
         from . import lumerical  # noqa: F401
+    if name == "lumerical_charge_fde":
+        from . import lumerical_charge_fde  # noqa: F401
     if name not in _REGISTRY:
         raise KeyError(f"unknown backend {name!r}; available: {sorted(_REGISTRY)}")
     return _REGISTRY[name](**kw)

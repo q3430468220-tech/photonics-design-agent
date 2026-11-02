@@ -56,15 +56,14 @@ class Journal:
     def render(self) -> None:
         es = self.entries()
         lines = ["# Experiment journal", "", f"_{len(es)} iterations, {sum(1 for e in es if e.get('sim_spent'))} simulations spent_", ""]
-        lines += ["| iter | mode | predicted (dB) | measured (dB) | miss (sigma) | xtalk (dB) | decision | note |", "|---|---|---|---|---|---|---|---|"]
+        lines += ["| iter | mode | type | predicted | measured | miss (sigma) | decision | note |", "|---|---|---|---|---|---|---|---|"]
         for e in es:
             p = e.get("prediction") or {}
-            pred = f"{p['fom']:.3f} +- {p['sigma']:.3f}" if p.get("fom") is not None else "-"
-            meas = f"{e['fom']:.4f}" if e.get("fom") is not None else "-"
+            pred = f"{p['fom']:.4g} +- {p['sigma']:.2g}" if p.get("fom") is not None else "-"
+            meas = f"{e['fom']:.4g}" if e.get("fom") is not None else "-"
             miss = f"{e['miss_sigma']:+.2f}" if e.get("miss_sigma") is not None else "-"
-            xt = f"{e['summary']['crosstalk_worst_dB']:.1f}" if e.get("summary") else "-"
-            note = (e.get("reason") or e.get("change") or "").replace("\n", " ")[:80]
-            lines.append(f"| {e['iteration']} | {e.get('mode','')} | {pred} | {meas} | {miss} | {xt} | {e.get('decision','')} | {note} |")
+            note = (e.get("label") or e.get("reason") or e.get("change") or "").replace("\n", " ")[:80]
+            lines.append(f"| {e['iteration']} | {e.get('mode','')} | {e.get('change_type','')} | {pred} | {meas} | {miss} | {e.get('decision','')} | {note} |")
         lines.append("")
         for e in es:
             lines += [f"## Iteration {e['iteration']} - {e.get('mode','')} - {e.get('decision','')}", ""]
@@ -76,15 +75,7 @@ class Journal:
             if p.get("fom") is not None:
                 lines += [f"**Predicted.** FOM {p['fom']:.3f} +- {p['sigma']:.3f} dB. {p.get('notes','')}", ""]
             if e.get("summary"):
-                s = e["summary"]
-                lines += [
-                    f"**Measured.** IL worst {s['IL_worst_dB']:.4f} dB @ {s['IL_worst_wl_um']:.3f} um; crosstalk {s['crosstalk_worst_dB']:.1f} dB; "
-                    f"reflection {s['reflection_worst_dB']:.1f} dB; closure err {s['closure_err']:.4f}.",
-                    "",
-                    "Loss budget at the worst wavelength (fraction of input): "
-                    + ", ".join(f"{k.replace('_frac','')} {s[k]:.4f}" for k in ("radiation_frac", "crosstalk_frac", "through_higher_frac", "reflection_frac")),
-                    "",
-                ]
+                lines += [f"**Measured.** {e.get('summary_text') or e['summary']}", ""]
             if e.get("breakdown_table"):
                 lines += ["```", e["breakdown_table"], "```", ""]
             if e.get("miss_sigma") is not None:
@@ -106,24 +97,18 @@ class Journal:
         out = []
         b = self.best()
         if b:
-            out.append(f"BEST so far: iter {b['iteration']} FOM {b['fom']:.4f} dB (xtalk {b['summary']['crosstalk_worst_dB']:.1f} dB) - design in best/design.py")
+            out.append(f"BEST so far: iter {b['iteration']} FOM {b['fom']:.4g} ({b.get('summary_text','')}) - design in best/design.py")
         else:
             out.append("BEST so far: none kept yet")
         out.append(f"simulations spent: {self.sims_used()}")
         out.append("")
         for e in es[-last_n:]:
             p = e.get("prediction") or {}
-            pred = f"pred {p['fom']:.3f}+-{p['sigma']:.3f}" if p.get("fom") is not None else "pred -"
+            pred = f"pred {p['fom']:.4g}+-{p['sigma']:.2g}" if p.get("fom") is not None else "pred -"
             if e.get("mode") == "model":
                 meas = f"MODEL UPDATED: {(e.get('reason') or '')[:160]}" if e.get("decision") == "model updated" else f"model turn failed ({e.get('stage','')}): {(e.get('reason') or '')[:160]}"
             elif e.get("valid"):
-                s = e["summary"]
-                meas = (
-                    f"meas IL {e['fom']:.4f} dB (rad {s['radiation_frac']:.4f}, xt {s['crosstalk_frac']:.4f}, higher {s['through_higher_frac']:.4f}, "
-                    f"refl {s['reflection_frac']:.4f}) miss {e['miss_sigma']:+.2f}s"
-                    if e.get("miss_sigma") is not None
-                    else f"meas IL {e['fom']:.4f} dB"
-                )
+                meas = f"meas FOM {e['fom']:.4g} ({e.get('summary_text','')})" + (f" miss {e['miss_sigma']:+.2f}s" if e.get("miss_sigma") is not None else "")
             else:
                 meas = f"INVALID ({e.get('stage','')}): {(e.get('reason') or '')[:160]}"
             out.append(f"[{e['iteration']}] {e.get('mode','')}: {e.get('change','')[:140]}")

@@ -121,10 +121,20 @@ class Polygon:
 
 @dataclass
 class Geometry:
+    """A device as polygons + ports in one plane.
+
+    plane = "xy": layout top view (passive devices); polygons are extruded to `thickness`.
+    plane = "xz": vertical cross-section (active phase shifters); the second coordinate
+                  is height above the BOX, polygons are extruded along the propagation
+                  direction, `ports` is empty and contacts are polygons on a metal layer
+                  with props {"terminal": "anode" | "cathode"}.
+    """
+
     polygons: List[Polygon]
     ports: List[Port]
     thickness: float = 0.22
     meta: Dict = field(default_factory=dict)
+    plane: str = "xy"
 
     # -- basic queries ------------------------------------------------------
     def bbox(self) -> Tuple[float, float, float, float]:
@@ -143,8 +153,15 @@ class Geometry:
         return float(sum(p.area() for p in self.polygons))
 
     # -- serialisation / identity -----------------------------------------
+    def by_layer(self, layer: str) -> List[Polygon]:
+        return [p for p in self.polygons if p.layer.upper() == layer.upper()]
+
+    def by_domain(self, domain: str) -> List[Polygon]:
+        return [p for p in self.polygons if p.domain == domain]
+
     def to_dict(self) -> dict:
         return {
+            "plane": self.plane,
             "thickness": float(self.thickness),
             "polygons": [p.to_dict() for p in self.polygons],
             "ports": [p.to_dict() for p in self.ports],
@@ -158,11 +175,13 @@ class Geometry:
             [Port.from_dict(p) for p in d["ports"]],
             d.get("thickness", 0.22),
             d.get("meta", {}),
+            d.get("plane", "xy"),
         )
 
     def hash(self) -> str:
         """Stable identity of the geometry (coordinates rounded to 0.1 nm)."""
         payload = {
+            "plane": self.plane,
             "t": round(float(self.thickness), 4),
             "polys": [[p.layer, np.round(p.points, 4).tolist(), json.dumps(p.props, sort_keys=True, default=str)] for p in self.polygons],
             "ports": [p.to_dict() for p in self.ports],
@@ -177,6 +196,14 @@ class Geometry:
 
 def rect(x0: float, y0: float, x1: float, y1: float, layer: str = "WG", props: Optional[Dict] = None) -> Polygon:
     return Polygon(np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]), layer, dict(props or {}))
+
+
+def xz_rect(x0: float, x1: float, z0: float, z1: float, layer: str, **props) -> Polygon:
+    """Axis-aligned rectangle of a cross-section (x lateral, z height above the BOX), e.g.
+    xz_rect(-0.25, 0.25, 0, 0.22, "SI")                       the rib
+    xz_rect(-3, 0, 0, 0.22, "P", doping=5e17, dopant="p")     an implant window (cm^-3)
+    xz_rect(1.5, 2.0, 0.22, 0.5, "METAL", terminal="cathode") a contact"""
+    return Polygon(np.array([[x0, z0], [x1, z0], [x1, z1], [x0, z1]]), layer, dict(props))
 
 
 def region(points, layer: str, **props) -> Polygon:

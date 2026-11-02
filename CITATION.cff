@@ -3,7 +3,7 @@ message: "If you use this software in research, please cite it as below."
 title: "photonics-design-agent: an LLM agent for photonic device design with loss attribution, pre-registered predictions and typed design changes (PRISM-Min)"
 authors:
   - name: "LumaTrace"
-version: 0.1.0
+version: 0.2.0
 date-released: 2026-11-02
 license: MIT
 repository-code: "https://github.com/q3430468220-tech/photonics-design-agent"

@@ -89,4 +89,13 @@ def crossing_features(geom: Geometry, cfg: SimConfig, dx: float = 0.01) -> Dict[
 
 
 def format_features(feat: Dict[str, float]) -> str:
-    return ", ".join(f"{k}={v:.3f}" for k, v in feat.items())
+    def fmt(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        if v != v:  # nan
+            return "nan"
+        return f"{v:.3g}" if (abs(v) >= 1e4 or (0 < abs(v) < 1e-3)) else f"{v:.3f}"
+
+    return ", ".join(f"{k}={fmt(v)}" for k, v in feat.items())

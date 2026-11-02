@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -16,20 +17,49 @@ from matplotlib.ticker import MaxNLocator  # noqa: E402
 from .geometry import Geometry  # noqa: E402
 
 
+LAYER_COLOURS = {
+    "geometry": ("#9fb3c8", "#1f3b5a"),
+    "doping_p": ("#f4b6b6", "#b03a2e"),
+    "doping_n": ("#b6d4f4", "#2b6cb0"),
+    "electrode": ("#d9c27a", "#7a5c00"),
+    "stack": ("#e0e0e0", "#777777"),
+}
+
+
+def _colours(p) -> tuple:
+    dom = p.domain
+    if dom == "doping":
+        typ = str(p.props.get("dopant", "p" if p.layer.upper().startswith("P") else "n")).lower()
+        face, edge = LAYER_COLOURS["doping_p" if typ.startswith("p") else "doping_n"]
+        # heavier doping -> darker fill
+        conc = float(p.props.get("doping", 1e17) or 1e17)
+        alpha = min(0.25 + 0.15 * max(0.0, (np.log10(conc) - 17)), 0.85)
+        return face, edge, alpha
+    face, edge = LAYER_COLOURS.get(dom, LAYER_COLOURS["geometry"])
+    return face, edge, 0.9
+
+
 def plot_geometry(geom: Geometry, path: Path, title: str = "") -> Path:
-    fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
-    for p in geom.polygons:
-        ax.add_patch(MplPolygon(p.points, closed=True, facecolor="#9fb3c8", edgecolor="#1f3b5a", lw=0.6))
+    xz = getattr(geom, "plane", "xy") == "xz"
+    fig, ax = plt.subplots(figsize=(7, 3.2) if xz else (5, 5), dpi=120)
+    order = {"geometry": 0, "stack": 0, "doping": 1, "electrode": 2}
+    for p in sorted(geom.polygons, key=lambda q: order.get(q.domain, 0)):
+        face, edge, alpha = _colours(p)
+        ax.add_patch(MplPolygon(p.points, closed=True, facecolor=face, edgecolor=edge, lw=0.6, alpha=alpha))
+        if xz and p.domain in ("doping", "electrode"):
+            x0, z0, x1, z1 = p.bbox()
+            txt = p.layer if p.domain == "doping" else str(p.props.get("terminal", p.layer))
+            ax.text(0.5 * (x0 + x1), z1 + 0.03, txt, fontsize=6, ha="center", va="bottom", color=edge)
     for pt in geom.ports:
         ux, uy = pt.unit()
         ax.annotate(pt.name, pt.center, xytext=(pt.center[0] + 0.6 * ux, pt.center[1] + 0.6 * uy), fontsize=8, ha="center", va="center", color="#b03a2e")
     xmin, ymin, xmax, ymax = geom.bbox()
     pad = 0.1 * max(xmax - xmin, ymax - ymin) + 0.5
     ax.set_xlim(xmin - pad, xmax + pad)
-    ax.set_ylim(ymin - pad, ymax + pad)
-    ax.set_aspect("equal")
+    ax.set_ylim((ymin - 0.25, ymax + 0.35) if xz else (ymin - pad, ymax + pad))
+    ax.set_aspect("equal" if not xz else "auto")
     ax.set_xlabel("x (um)")
-    ax.set_ylabel("y (um)")
+    ax.set_ylabel("z (um)" if xz else "y (um)")
     ax.set_title(title, fontsize=9)
     ax.grid(alpha=0.2)
     path = Path(path)
@@ -73,6 +103,15 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
     path.parent.mkdir(parents=True, exist_ok=True)
 
     from .agent import split_change_type
+
+    try:
+        from .families import family_for
+
+        fam = family_for(cfg) if cfg is not None else None
+    except Exception:  # noqa: BLE001
+        fam = None
+    unit = fam.fom_unit if fam else ""
+    ylabel = ("FOM: " + fam.fom_label) if fam else "FOM (lower is better)"
 
     xs, ys, kinds, domains, decisions, labels, iters = [], [], [], [], [], [], []
     for i, e in enumerate(sims, start=1):
@@ -147,7 +186,7 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
             prev_best = y
         txt = "\n".join(textwrap.wrap(lab, 28)[:2])
         if big:
-            txt = f"{txt}\n(−{gain:.3f} dB)"
+            txt = f"{txt}\n(−{gain:.3g} {unit})".rstrip()
         dy = (22 if toggle % 2 == 0 else -26)
         toggle += 1
         ax.annotate(
@@ -171,8 +210,7 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
     else:
         ax.set_ylim(max(0.0, ymin - 0.08 * (ymax - ymin + 1e-9)), void_y * 1.12 if decisions.count("void") else ymax * 1.12)
     ax.set_xlabel("Experiment (simulations spent)")
-    fom_name = getattr(cfg, "fom_description", "FOM") if cfg is not None else "FOM"
-    ax.set_ylabel("FOM: " + fom_name.split("(")[0].strip() + " (dB, lower is better)", fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=9)
     ax.set_title(title or "Design evolution - what the agent changed and what it bought", fontsize=10)
     ax.grid(alpha=0.25)
     ax.set_xlim(0.3, max(xs) + 0.7)

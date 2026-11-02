@@ -46,9 +46,20 @@ def _centroid(mask: np.ndarray, r: Raster) -> Optional[Tuple[float, float]]:
 
 
 def run_drc(geom: Geometry, cfg: SimConfig) -> List[Violation]:
+    """Generic raster DRC on the waveguide (geometry-domain) polygons of a layout (plane 'xy').
+
+    Cross-sections (plane 'xz') and non-geometry layers (implants, metals) are checked by
+    their device family instead.
+    """
     v: List[Violation] = []
     if not geom.polygons:
         return [Violation("geometry", "no polygons")]
+    if geom.plane != "xy":
+        return v
+    wg = geom.by_domain("geometry")
+    if not wg:
+        return [Violation("geometry", "no waveguide-layer polygons")]
+    geom = Geometry(wg, geom.ports, geom.thickness, geom.meta, geom.plane)
 
     xmin, ymin, xmax, ymax = geom.bbox()
     if (xmax - xmin) > cfg.max_extent or (ymax - ymin) > cfg.max_extent:

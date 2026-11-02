@@ -1,30 +1,37 @@
 # photonics-design-agent
 
-**An LLM agent that designs photonic devices by running Lumerical simulations in a loop — and that must predict every result before it measures it, explain where the loss went after, and record which kind of change (parameter, shape, topology; geometry, doping, electrode) bought each improvement.**
+**An LLM agent that designs passive and active photonic devices by running Lumerical simulations in a loop — FDTD for waveguide components, CHARGE + FDE for PN phase shifters — and that must predict every result before it measures it, explain where the loss (or the efficiency, or the bandwidth) went after, and record which kind of change (parameter, shape, topology; geometry, doping, electrode) bought each improvement.**
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
-![simulation](https://img.shields.io/badge/simulation-Ansys%20Lumerical%20FDTD-orange)
+![simulation](https://img.shields.io/badge/simulation-Lumerical%20FDTD%20%7C%20CHARGE%20%7C%20FDE-orange)
+![devices](https://img.shields.io/badge/devices-passive%20%7C%20active-2b6cb0)
 ![llm](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI--compatible-6f42c1)
-![status](https://img.shields.io/badge/status-v0.1%20alpha-lightgrey)
+![status](https://img.shields.io/badge/status-v0.2%20alpha-lightgrey)
 
 Letting a language model edit a geometry file, run FDTD and keep the result when the number improves is easy to set up and it does find good devices. What it does not give you is understanding: after fifty simulations you have a design and a log of "tried X, got Y", but you cannot say which change mattered, whether the model grasped the physics or stumbled onto the answer, or whether a given simulation was even trustworthy. For a research tool that is the wrong trade. This repository keeps that simple loop (the method is called **PRISM-Min**) and adds three things that are enforced by code, not by prompt: every simulation returns a **loss breakdown with a measured flux closure**, the agent must **register a prediction from its own physics model** before each run and fix the model when it is wrong, and every turn is **tagged with the kind of change it made**, so the optimisation history reads as a sequence of design decisions rather than a random walk.
 
 <p align="center">
-  <img src="docs/images/evolution_demo.png" width="94%" alt="Evolution chart from the offline demo"><br>
-  <img src="docs/images/crossing_start_vs_best.png" width="80%" alt="Starting and best crossing of the demo"><br>
-  <em>Offline demo on the toy backend: a 220 nm SOI waveguide crossing goes from 1.09 dB to 0.069 dB in eight simulations. Marker shape = kind of change, label = the agent's own reason, bold = jumps above 15 %, dashed line = the agent rewrote its physics model.</em>
+  <img src="docs/images/evolution_demo.png" width="94%" alt="Evolution chart, passive demo"><br>
+  <em>Passive family, offline demo: a 220 nm SOI waveguide crossing goes from 1.09 dB to 0.069 dB in eight simulations. Marker shape = kind of change, label = the agent's own reason, bold = jumps above 15 %, dashed line = the agent rewrote its physics model.</em>
+</p>
+<p align="center">
+  <img src="docs/images/evolution_pn_demo.png" width="94%" alt="Evolution chart, active demo"><br>
+  <img src="docs/images/pn_xsection.png" width="70%" alt="PN phase-shifter cross-section"><br>
+  <em>Active family, offline demo: a lateral PN phase shifter (VπL × α at −2 V) improved from 23 to 13.5 V dB by doping, junction, rib-width and implant changes; purple edges mark doping-domain changes. Below: the cross-section the agent edits (red p, blue n, darker = heavier; contacts in gold).</em>
 </p>
 
 ## What is inside
 
-The code has four parts. Each one can be replaced on its own.
+The code has four parts plus a device-family layer. Each one can be replaced on its own.
+
+**Device families** (`prism_min/families/`) hold everything that depends on *what* is being designed: how a geometry is measured, which rules it must obey, how a simulation result is decomposed, what the FOM and the constraints are, and how a result is summarised for the agent. Two families ship. `passive_4port` is a layout (plane *xy*) with four ports — crossings, and with small changes bends, tapers, MMIs — judged by FDTD. `pn_phase_shifter` is an *xz* cross-section of a lateral PN junction — rib, slab, implant windows with concentrations, metal contacts — judged by CHARGE + FDE; its FOM is VπL × α at a reference bias with an RC-bandwidth constraint. Adding a family (TFLN MZM, thermo-optic shifter, photodetector) means writing one module; the loop, guard, journal and chart do not change.
 
 **The judge** (`prism_min/evaluate.py`, `checks.py`, `decompose.py`, `guard.py`) is the part the agent cannot touch. It builds the geometry from `design.py`, runs DRC (minimum width, gap, area, port placement) and simulation-sanity checks (mesh resolution, uniform port straights, four-fold symmetry), refuses to simulate unless a prediction has been registered for exactly this geometry, runs the backend, splits the result into through-port fundamental mode, higher-order modes, crosstalk, reflection and radiation, and voids the run if the measured flux through a box around the device is not 1 within tolerance. All numerical settings come from a locked `sim_config.py` whose hash is written into every record.
 
-**The backends** (`prism_min/backends/`) turn a `Geometry` into normalised flux data. `lumerical` builds the full FDTD project through lumapi — port waveguides extended through the PML, mode source and reflection monitor at the input, power and mode-expansion monitors at the other ports, a six-face flux box, a field monitor for the plot. `mock` is an analytic model of a crossing with 2 % deterministic noise, used to test the loop without a licence.
+**The backends** (`prism_min/backends/`) turn a `Geometry` into simulation data. `lumerical` builds the full FDTD project through lumapi — port waveguides extended through the PML, mode source and reflection monitor at the input, power and mode-expansion monitors at the other ports, a six-face flux box, a field monitor for the plot. `lumerical_charge_fde` runs the active chain: CHARGE with Masetti/high-field mobility and Slotboom band-gap narrowing, a reverse-bias sweep, carrier export, then MODE-FDE with the carriers as an np-density perturbation to get n_eff(V) and loss(V); the perturbation integrals that split the result into terms are done in Python from the CHARGE carriers and the 0 V mode. `mock` and `mock_pn` are analytic toys (a diffraction model of a crossing; a 1-D depletion + Soref model of the junction) used to test the loop without a licence.
 
 **The agent loop** (`prism_min/agent.py`, `prompts.py`, `llm.py`, `journal.py`) runs design turns and model turns. In a design turn the LLM reads `program.md`, the current `design.py`, its own `model.py`, `laws.md`, a digest of the journal and the last breakdown, then returns a hypothesis, a change, a change type, a short label and a complete new `design.py`. The runner asks `model.py` for a prediction, simulates, and keeps the design only if it beats the best by more than the noise threshold with constraints met. If the measurement missed the prediction by more than 2σ, or if `model.py` has stopped predicting recent runs within 2σ (the *understanding gate*), the next turn may only rewrite `model.py`. LLMs are called with plain `requests`; Anthropic and any OpenAI-compatible endpoint (DeepSeek, Qwen, relays) work.
 
@@ -39,6 +46,16 @@ The code has four parts. Each one can be replaced on its own.
 | `radiation` | everything else that left the flux box |
 | `box_total` | measured total outward flux; must be 1 ± `closure_tol` or the run is voided |
 
+| what a PN phase-shifter simulation returns (per bias) | meaning |
+|---|---|
+| `dneff_total(V)` | n_eff(V) − n_eff(0) from the full FDE solve with carriers; VπL = λ·\|V\|/(2·dneff) at `v_ref` |
+| `dneff_core`, `dneff_slab` | perturbation split: depletion inside the rib vs. in the slab |
+| `alpha_total(V)` | propagation loss in dB/cm from the full solve (+ a fixed scattering floor) |
+| `alpha_fca_p`, `alpha_fca_n` | free-carrier absorption by holes / electrons (Soref) |
+| `alpha_contacts` | loss of the undoped structure: metal and substrate leakage |
+| `C_fF_um(V)`, `R_ohm_m` | junction capacitance per length (dQ/dV), series resistance × length → f_RC = 1/(2πRC) |
+| closure | perturbation terms must reproduce the full-solve dneff and α within `closure_tol` |
+
 ```mermaid
 flowchart LR
     H["program.md<br/>goal · constraints · FOM · budget"] --> A
@@ -46,8 +63,8 @@ flowchart LR
     A["agent (LLM)<br/>hypothesis → design.py<br/>change type + label"] --> J{"judge"}
     M["model.py (agent-written)<br/>predict FOM ± σ"] -- "registered before run" --> J
     J -- "DRC / sanity fail" --> R["revert, no simulation"]
-    J --> S["backend<br/>Lumerical FDTD · mock"]
-    S --> D["breakdown + closure<br/>TE0 · higher · xtalk · refl · rad · box"]
+    J --> S["backend<br/>FDTD (passive) · CHARGE+FDE (active) · mocks"]
+    S --> D["family breakdown + closure<br/>passive: TE0 · higher · xtalk · refl · rad · box<br/>active: dneff core/slab · α p/n/contacts · C · R"]
     D -- "closure fail" --> V["void run"]
     D --> K{"better than best<br/>by > noise, constraints ok?"}
     K -- yes --> B["best/design.py"]
@@ -64,25 +81,28 @@ git clone https://github.com/q3430468220-tech/photonics-design-agent.git
 cd photonics-design-agent
 pip install -e .
 
-# 2. watch the loop run with no API key and no simulator (scripted agent, toy backend, ~10 s)
-python examples/demo_scripted.py          # prints the journal, writes examples/demo_evolution.png
+# 2. watch the loop run with no API key and no simulator (scripted agent, toy backends, ~10 s each)
+python examples/demo_scripted.py          # passive: crossing      -> examples/demo_evolution.png
+python examples/demo_pn_scripted.py       # active: PN shifter     -> examples/demo_pn_evolution.png
 
 # 3. configure an LLM (and Lumerical)
 cp .env.example .env                      # ANTHROPIC_API_KEY  or  OPENAI_API_KEY + OPENAI_BASE_URL
 #    PowerShell: $env:LUMERICAL_ROOT="D:\Program Files\ANSYS Inc\v251"   (folder containing api\python\lumapi.py)
 
-# 4. create an experiment from the crossing template and describe the task
-prism init experiments/my_crossing
+# 4. create an experiment from a template and describe the task
+prism init experiments/my_crossing                                 # passive (default template soi_crossing)
+prism init experiments/my_shifter --template soi_pn_phase_shifter  # active
 #    edit experiments/my_crossing/program.md      goal, constraints, FOM, budget, hints
 #    edit experiments/my_crossing/design.py       a starting geometry that passes the checks
 #    edit experiments/my_crossing/sim_config.py   only if band / mesh / rules differ
 
 # 5. validate the judge before spending budget
 prism check experiments/my_crossing --plot                       # build + DRC + sanity + model prediction, no simulation
-prism eval  experiments/my_crossing --manual --backend lumerical # one simulation you trigger; read the breakdown and the closure column
+prism eval  experiments/my_crossing --manual --real              # one simulation you trigger; read the breakdown and the closure column
+prism eval  experiments/my_shifter  --manual --real              # same for the active family (CHARGE + FDE)
 
 # 6. run, inspect, audit
-prism run    experiments/my_crossing --backend lumerical --sims 50
+prism run    experiments/my_crossing --real --sims 50            # --real = the family's Lumerical backend; default = its mock
 prism status experiments/my_crossing
 prism plot   experiments/my_crossing                             # evolution.png (also refreshed after every iteration)
 prism review experiments/my_crossing                             # independent LLM audit of laws.md vs the journal
@@ -91,11 +111,11 @@ prism review experiments/my_crossing                             # independent L
 python -m unittest discover -s tests -t .
 ```
 
-Add `--backend mock` to any command to run it on the toy model. Lumerical cannot open projects on paths with non-ASCII characters; keep the experiment folder on an ASCII path.
+Without `--real` every command runs on the family's toy backend (`mock` / `mock_pn`); `--backend` picks one explicitly. Lumerical cannot open projects on paths with non-ASCII characters; keep the experiment folder on an ASCII path.
 
 ## Writing an experiment
 
-`program.md` is a task brief for a new graduate student: platform, port interface, what the FOM is, which constraints are hard, how many simulations may be spent, and any hints you are willing to give. The template for the crossing is a good model. `design.py` must define `build() -> Geometry`; the helpers in `prism_min.geometry` (`rect`, `taper`, `profile_taper`, `four_fold`, `region` for doped or metal areas with properties) cover most single-layer devices. `model.py` must define `predict(geom) -> {"fom", "sigma", ...}`; the template ships a deliberately crude literature prior and the agent is expected to replace it after the first miss. `sim_config.py` is yours and locked: band, mesh, PML margins, DRC rules, FOM thresholds, noise threshold, closure tolerance, budget and gate parameters.
+`program.md` is a task brief for a new graduate student: platform, port interface, what the FOM is, which constraints are hard, how many simulations may be spent, and any hints you are willing to give. The template for the crossing is a good model. `design.py` must define `build() -> Geometry`. For layouts the helpers in `prism_min.geometry` (`rect`, `taper`, `profile_taper`, `four_fold`) cover most single-layer devices; for cross-sections `xz_rect(x0, x1, z0, z1, layer, **props)` draws rib, slab, implant windows (`doping=` in cm⁻³, `dopant=`) and contacts (`terminal=`), and `Geometry(..., plane="xz")` tells the judge which family rules apply. `model.py` must define `predict(geom) -> {"fom", "sigma", ...}`; the template ships a deliberately crude literature prior and the agent is expected to replace it after the first miss. `sim_config.py` is yours and locked: band, mesh, PML margins, DRC rules, FOM thresholds, noise threshold, closure tolerance, budget and gate parameters.
 
 ## Repository layout
 
@@ -107,14 +127,20 @@ photonics-design-agent/
 │   ├── geometry.py                      Geometry IR: Polygon(layer, props) + Port; rect / taper / profile_taper /
 │   │                                    four_fold / region; raster + morphology (numpy); layer_domain()
 │   ├── checks.py                        DRC (width, gap, area, ports) and sanity (mesh, port straights, symmetry)
-│   ├── config.py                        SimConfig: every locked number, plus its hash
-│   ├── features.py                      geometry measurements (junction width, arm width, taper adiabaticity …)
-│   │                                    shared by the mock, the prompts and model.py
+│   ├── config.py                        SimConfig (+ ActiveConfig): every locked number, plus its hash
+│   ├── features.py                      passive geometry measurements (junction width, taper adiabaticity …)
+│   ├── families/                        device-specific parts of the judge
+│   │   ├── __init__.py                  Family interface, registry, family_for(cfg)
+│   │   ├── passive_4port.py             crossing & co: features, sanity, breakdown, FOM (wraps decompose/features)
+│   │   └── pn_phase_shifter.py          lateral PN cross-section: parse_xsection, rules, 1-D depletion + Soref toy,
+│   │                                    PNResult / PNBreakdown, VpiL x alpha FOM, f_RC constraint
 │   ├── backends/
-│   │   ├── base.py                      SimResult (normalised flux per port + box), Backend, registry
-│   │   ├── mock.py                      analytic crossing model with noise and a closure failure mode
-│   │   └── lumerical.py                 FDTD through lumapi: structures, source, monitors, flux box, field plot
-│   ├── decompose.py                     breakdown, closure check, FOM + constraints
+│   │   ├── base.py                      SimResult (passive flux data), Backend, registry
+│   │   ├── mock.py / mock_pn.py         analytic toys for the two families
+│   │   ├── lumerical.py                 FDTD through lumapi: structures, source, monitors, flux box, field plot
+│   │   └── lumerical_charge_fde.py      CHARGE sweep -> charge.mat -> FDE np-density -> n_eff(V), loss(V);
+│   │                                    perturbation integrals and R x L from the carriers (python side)
+│   ├── decompose.py                     passive breakdown, closure check, FOM + constraints
 │   ├── guard.py                         PredictionRegistry: one registered prediction per geometry hash
 │   ├── evaluate.py                      build → checks → guard → simulate → closure → score
 │   ├── experiment.py                    experiment folder, safe import of design.py / model.py, snapshots, best/
@@ -124,10 +150,13 @@ photonics-design-agent/
 │   ├── agent.py                         mode decision, calibration, design / model turns, classify_change()
 │   ├── viz.py                           geometry preview, evolution chart
 │   └── cli.py                           prism init | check | eval | run | status | plot | review
-├── experiments/soi_crossing/            template: program.md, sim_config.py, design.py, model.py, laws.md
-├── examples/demo_scripted.py            offline demonstration (scripted LLM + mock backend)
+├── experiments/
+│   ├── soi_crossing/                    passive template: 220 nm SOI crossing, IL < 0.06 dB
+│   └── soi_pn_phase_shifter/            active template: lateral PN shifter, VpiL x alpha < 20 V dB, f_RC > 40 GHz
+├── examples/demo_scripted.py            offline demonstration, passive (scripted LLM + mock)
+├── examples/demo_pn_scripted.py         offline demonstration, active (scripted LLM + mock_pn)
 ├── docs/images/                         figures used in this README
-├── tests/                               unittest: geometry, checks, decomposition, guard, parser, full loop
+├── tests/                               unittest: geometry, checks, decomposition, guard, parser, both families, full loops
 └── ROADMAP.md  CONTRIBUTING.md  CITATION.cff  LICENSE
 ```
 
@@ -149,10 +178,11 @@ experiments/my_crossing/
 | stage | content | status |
 |---|---|---|
 | 0 · loop | judge, guard, breakdown + closure, design / model turns, understanding gate, journal, evolution chart, mock backend, tests | **v0.1** |
-| 1 · real simulations | Lumerical FDTD backend validated on the crossing; finer-mesh re-check of kept designs | written, **not yet validated** |
+| 1 · real simulations | Lumerical FDTD backend validated on the crossing; CHARGE + FDE backend validated on the PN shifter; finer-mesh re-check of kept designs | both written, **not yet validated** |
 | 2 · evidence | same loop with breakdown / prediction / gate switched off as a baseline; random search and CMA-ES on the same parametrisation; prediction-miss distribution as the understanding metric | planned |
 | 3 · passive library | geometry helpers (arcs, Euler bends, Bézier, periodic arrays), templates for bends, tapers, MMIs, directional couplers | planned |
-| 4 · active devices | CHARGE + FDE backend; decomposition in the active algebra (1/Q = 1/Q_c + 1/Q_int, Δn_eff/V = ΔN × overlap, VπL factors, bandwidth limits); MRM and TFLN MZM templates | planned |
+| 4 · active devices | lateral PN phase-shifter family (CHARGE + FDE, VπL × α, f_RC) | **v0.2** (mock-tested) |
+| | ring level on top of the shifter (1/Q = 1/Q_c + 1/Q_int, ER/IL from Q_c/Q_int, photon-lifetime limit); TFLN MZM family (VπL ∝ g/(n³ r₃₃ Γ), RF-loss / velocity / impedance limits); thermo-optic shifter | planned |
 | 5 · search | adjoint polish of continuous parameters inside a structure chosen by the agent; multi-fidelity screening; an archive of structurally different candidates | planned |
 
 See [ROADMAP.md](ROADMAP.md) for details.
@@ -163,7 +193,7 @@ The agent edits exactly one file per turn and nothing else; what it may do is en
 
 ## Status and limitations
 
-This is an alpha. The loop, the judge and the bookkeeping are covered by 27 tests and run end to end on the mock backend. The Lumerical backend was written against lumapi conventions for FDTD 2023–2025 but has not yet been executed on a real installation; expect the material names and the mode-expansion result keys to need a one-line fix each. The change classifier works from the through-arm width profile and from layer names and polygon properties; it is a cross-check on the agent's declaration, not a ground truth. The mock backend is a toy and no physics should be read from it. Agent-written `design.py` and `model.py` are executed with your privileges, as in any autoresearch-style loop.
+This is an alpha. The loop, the judge, both families and the bookkeeping are covered by 32 tests and run end to end on the mock backends. Neither Lumerical backend has been executed on a real installation yet: `lumerical.py` was written against lumapi conventions for FDTD 2023–2025, `lumerical_charge_fde.py` is a port of working CHARGE/FDE `.lsf` scripts; expect material names, result keys and one or two property strings to need a fix each. The PN toy model is a 1-D abrupt-junction approximation with an analytic mode profile: its trends are right, its numbers are not, and it cannot represent interleaved or vertical junctions. The change classifier works from the through-arm width profile and from layer names and polygon properties; it is a cross-check on the agent's declaration, not a ground truth. The mock backend is a toy and no physics should be read from it. Agent-written `design.py` and `model.py` are executed with your privileges, as in any autoresearch-style loop.
 
 ## Disclaimer
 
@@ -173,4 +203,4 @@ The crossing template uses public design-rule values for teaching and simulation
 
 Contributions are welcome, especially a validated Lumerical run, new device templates and backends for other solvers; see [CONTRIBUTING.md](CONTRIBUTING.md). If this project helps your research, please cite it via [CITATION.cff](CITATION.cff). Code is released under the [MIT licence](LICENSE).
 
-Related: [photonics-layout-cookbook](https://github.com/q3430468220-tech/photonics-layout-cookbook) — gdsfactory layout recipes with a GDS → Lumerical bridge; its process files and cells are the intended source of doped and metal layers for the active-device stage here.
+Related: [photonics-layout-cookbook](https://github.com/q3430468220-tech/photonics-layout-cookbook) — gdsfactory layout recipes with a GDS → Lumerical bridge; its process files (layer roles, implants, stack) are the intended source of the cross-sections used by the active family here.

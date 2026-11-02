@@ -19,10 +19,10 @@ from typing import Callable, List, Optional, Tuple
 
 from . import prompts
 from .backends.base import Backend
-from .decompose import Breakdown
 from .evaluate import EvalResult, evaluate
 from .experiment import DesignError, Experiment
-from .features import crossing_features, format_features
+from .families import family_for
+from .features import format_features
 from .guard import PredictionRegistry
 from .journal import Journal
 from .llm import LLM, LLMError
@@ -230,6 +230,8 @@ def _profile_shape_changed(prev_geom, new_geom, rasterize, np) -> bool:
         wi = np.interp(xi, u, wt)
         return (wi - wi.min()) / max(wi.max() - wi.min(), 1e-9)
 
+    if getattr(prev_geom, "plane", "xy") != "xy" or getattr(new_geom, "plane", "xy") != "xy":
+        return False  # cross-sections are rectangles: no profile family to compare
     a, b = norm_profile(prev_geom), norm_profile(new_geom)
     if a is None or b is None:
         return False
@@ -248,6 +250,7 @@ class Agent:
         self.llm = llm
         self.log = log
         self.cfg = exp.config
+        self.family = family_for(self.cfg)
         self.journal = Journal(exp.dir)
         self.registry = PredictionRegistry(exp.dir)
 
@@ -311,7 +314,9 @@ class Agent:
                      miss_sigma=res.miss_sigma, backend=res.backend)
         if res.breakdown:
             entry["summary"] = res.breakdown["summary"]
-            entry["breakdown_table"] = _table_from_dict(res.breakdown)
+            entry["breakdown_table"] = _table_from_dict(res.breakdown, cfg)
+            entry["summary_text"] = res.summary_text
+            entry["violation_score"] = res.extra.get("violation_score", 0.0)
         if res.valid:
             exp.save_best()
             entry["decision"] = "keep"
@@ -467,7 +472,9 @@ class Agent:
         )
         if res.breakdown:
             entry["summary"] = res.breakdown["summary"]
-            entry["breakdown_table"] = _table_from_dict(res.breakdown)
+            entry["breakdown_table"] = _table_from_dict(res.breakdown, cfg)
+            entry["summary_text"] = res.summary_text
+            entry["violation_score"] = res.extra.get("violation_score", 0.0)
         self.log(f"  {res.short()}")
 
         # 5. decide
@@ -493,21 +500,21 @@ class Agent:
         return entry
 
     def _better(self, new: dict, best: Optional[dict]) -> bool:
-        thr = self.cfg.improve_threshold_db
+        """Lexicographic: constraints first, then FOM by more than the family's noise threshold.
+        When both violate, reducing the violation without worsening the FOM also counts."""
         if best is None:
             return True
+        thr = self.family.improve_threshold(self.cfg, best.get("fom"))
         if new["constraints_ok"] and not best.get("constraints_ok"):
             return True
         if not new["constraints_ok"] and best.get("constraints_ok"):
             return False
         gain = new["fom"] < best["fom"] - thr
         if not new["constraints_ok"]:
-            # both violate the constraints: progress on the binding constraint also counts,
-            # as long as the FOM does not get worse than noise
-            xt_new = new["summary"]["crosstalk_worst_dB"]
-            xt_best = best["summary"]["crosstalk_worst_dB"]
+            vs_new = new.get("violation_score", 0.0)
+            vs_best = best.get("violation_score", 0.0)
             not_worse = new["fom"] <= best["fom"] + thr
-            return (gain and xt_new <= xt_best + 0.5) or (xt_new < xt_best - 1.0 and not_worse)
+            return (gain and vs_new <= vs_best * 1.05 + 1e-9) or (vs_new < vs_best * 0.9 and not_worse)
         return gain
 
     # -- model turn --------------------------------------------------------------------
@@ -567,6 +574,7 @@ class Agent:
         except Exception as e:  # noqa: BLE001
             feats = f"(current design.py is broken: {e})"
         return prompts.DESIGN_TURN.format(
+            terms_help=self.family.terms_help,
             mode_reason=mode_reason,
             program=exp.read("program.md"),
             config_summary=cfg.summary_for_agent(),
@@ -588,10 +596,11 @@ class Agent:
             f = e.get("features") or {}
             s = e["summary"]
             hist.append(
-                f"[{e['iteration']}] {format_features({k: v for k, v in f.items() if isinstance(v, (int, float))})} -> IL {e['fom']:.4f} dB; rad {s['radiation_frac']:.4f}, xt {s['crosstalk_frac']:.4f}, "
-                f"higher {s['through_higher_frac']:.4f}, refl {s['reflection_frac']:.4f}"
+                f"[{e['iteration']}] {format_features({k: v for k, v in f.items() if isinstance(v, (int, float))})} -> FOM {e['fom']:.4g}; "
+                + self.family.digest_terms(s)
             )
         return prompts.MODEL_TURN.format(
+            terms_help=self.family.terms_help,
             mode_reason=mode_reason,
             sigma_cap=f"max({cfg.sigma_floor_db}, {cfg.sigma_cap_rel} x predicted FOM)",
             program=exp.read("program.md"),
@@ -649,13 +658,13 @@ class Agent:
 def _safe_features(geom, cfg) -> dict:
     """Features are descriptive only; never let them crash a turn (e.g. renamed ports)."""
     try:
-        return crossing_features(geom, cfg)
+        return family_for(cfg).features(geom, cfg)
     except Exception as e:  # noqa: BLE001
         return {"error": str(e)[:120]}
 
 
-def _table_from_dict(bd: dict) -> str:
-    import numpy as np
+def _table_from_dict(bd: dict, cfg=None) -> str:
+    from .families import get_family
 
-    b = Breakdown(np.asarray(bd["wavelengths"]), {k: np.asarray(v) for k, v in bd["terms"].items()}, np.asarray(bd["box_total"]), bd["closure_err"], bd["closure_ok"])
-    return b.table()
+    fam = get_family(bd.get("family", "passive_4port")) if cfg is None else family_for(cfg)
+    return fam.table_from_dict(bd)
