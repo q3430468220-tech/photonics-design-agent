@@ -53,3 +53,7 @@ supported by at least two measurements.
   windows between the core and the contacts lower R at some cost in loss.
 - Read the breakdown before changing anything: it tells you whether the loss is p- or
   n-side, whether the depletion is in the rib or the slab, and whether R or C limits f_RC.
+- Junction shape is a design variable: offset lateral, L-shaped (a horizontal segment under
+  the rib centre plus a vertical one) and vertical junctions trade more depletion-mode
+  overlap (lower VpiL) against more capacitance (lower f_RC). Draw them with several
+  implant windows.

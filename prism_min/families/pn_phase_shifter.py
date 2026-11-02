@@ -121,6 +121,10 @@ class XSection:
     ND: np.ndarray
     h: np.ndarray  # silicon height along x (um)
     contacts: Dict[str, Tuple[float, float]]  # terminal -> (x0, x1)
+    z: np.ndarray = field(default_factory=lambda: np.zeros(0))  # row grid (um)
+    NA2: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))  # (nx, nz) acceptors
+    ND2: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
+    si2: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), bool))  # (nx, nz) silicon present
 
     @property
     def rib_w(self) -> float:
@@ -186,7 +190,30 @@ def parse_xsection(geom: Geometry, cfg, dx: float = 0.002) -> XSection:
             term = str(p.props.get("terminal", "")).lower()
             if term:
                 contacts[term] = (x0, x1)
-    return XSection(rib_x0, rib_x1, a.core_height, slab_h, si_x0, si_x1, x, NA, ND, h, contacts)
+
+    # 2-D doping maps on a coarser grid (rows of dz) for the row-wise junction model
+    dz = 0.01
+    z = np.arange(dz / 2, a.core_height, dz)
+    xc = np.arange(si_x0 + dx, si_x1, 4 * dx)  # 8 nm columns
+    si2 = np.zeros((len(xc), len(z)), bool)
+    for x0, z0, x1, z1 in rects:
+        si2[np.ix_((xc >= x0) & (xc <= x1), (z >= z0) & (z <= z1))] = True
+    NA2 = np.zeros((len(xc), len(z)))
+    ND2 = np.zeros((len(xc), len(z)))
+    for p in geom.polygons:
+        if p.layer.upper() not in DOPING_LAYERS and p.domain != "doping":
+            continue
+        x0, z0, x1, z1 = _rect(p)
+        conc = float(p.props.get("doping", 0.0))
+        typ = str(p.props.get("dopant", "p" if p.layer.upper().startswith("P") else "n")).lower()
+        blk = np.ix_((xc >= x0 - 1e-9) & (xc <= x1 + 1e-9), (z >= z0 - 1e-9) & (z <= z1 + 1e-9))
+        if typ.startswith("p"):
+            NA2[blk] += conc
+        else:
+            ND2[blk] += conc
+    xs = XSection(rib_x0, rib_x1, a.core_height, slab_h, si_x0, si_x1, x, NA, ND, h, contacts, z, NA2, ND2, si2)
+    xs.xc = xc  # type: ignore[attr-defined]
+    return xs
 
 
 # ----------------------------------------------------------------------------
@@ -247,44 +274,136 @@ def depletion(xs: XSection, V: float) -> Tuple[float, float, float, float, float
     return (xp, xn, W, Na, Nd)
 
 
+def _depletion_1d(Na: float, Nd: float, V: float) -> float:
+    """Abrupt-junction depletion width (um) for anode bias V (reverse < 0)."""
+    if Na <= 0 or Nd <= 0:
+        return 0.0
+    vbi = KT_Q * np.log(Na * Nd / NI_CM3**2)
+    vr = max(vbi - V, 0.05)
+    return float(np.sqrt(2 * EPS_SI * vr / Q_E * (Na + Nd) / (Na * Nd * 1e6)) * 1e6)
+
+
+def mode_weight_2d(xs: XSection) -> np.ndarray:
+    """Normalised TE0 intensity on the (xc, z) grid inside the silicon (integrates to 1 over um^2).
+
+    Lateral: Gaussian in the rib, exponential tail outside. Vertical: Gaussian centred in the
+    local silicon thickness; in the thin slab the field is mostly outside the silicon, so the
+    in-silicon weight per unit height scales with (h_local / h_core).
+    """
+    xc, z = xs.xc, xs.z
+    xm = 0.5 * (xs.rib_x0 + xs.rib_x1)
+    half = xs.rib_w / 2
+    wx = half + 0.15
+    Ix = np.exp(-2 * ((xc - xm) / wx) ** 2)
+    out = np.abs(xc - xm) > half
+    Ix[out] = np.exp(-2 * (half / wx) ** 2) * np.exp(-(np.abs(xc[out] - xm) - half) / TAIL_LENGTH_UM)
+    h_loc = np.interp(xc, xs.x, xs.h)
+    I = np.zeros_like(xs.NA2)
+    for i, hl in enumerate(h_loc):
+        if hl <= 1e-6:
+            continue
+        Iz = np.exp(-2 * ((z - hl / 2) / (0.6 * hl)) ** 2) * (z <= hl + 1e-9)
+        Iz *= (hl / xs.rib_h) / max(Iz.sum() * (z[1] - z[0]), 1e-12)  # in-silicon fraction per column
+        I[i] = Ix[i] * Iz
+    I[~xs.si2] = 0.0
+    dA = (xc[1] - xc[0]) * (z[1] - z[0])
+    return I / max(I.sum() * dA, 1e-30)
+
+
+def _frac_inside(c: np.ndarray, dc: float, lo: float, hi: float) -> np.ndarray:
+    """Fraction of each cell (centre c, width dc) lying inside [lo, hi] (sub-cell resolution)."""
+    return np.clip((np.minimum(hi, c + dc / 2) - np.maximum(lo, c - dc / 2)) / dc, 0.0, 1.0)
+
+
+def _carriers_2d(xs: XSection, V: float):
+    """Row-wise (lateral) and column-wise (vertical) abrupt-junction depletion on the 2-D map.
+
+    Handles lateral, offset, L-shaped and vertical junctions approximately: every row with a
+    sign change of the net doping gets a lateral depletion zone, every column with a sign
+    change along z a vertical one; the union is depleted. Depletion edges are resolved below
+    the cell size with fractional occupancy. Returns (p, n, depleted_fraction, cap_sum) where
+    cap_sum = sum(dz / W_row) + sum(dx / W_col) (-> C' = eps * cap_sum).
+    """
+    xc, z = xs.xc, xs.z
+    dxc, dz = float(xc[1] - xc[0]), float(z[1] - z[0])
+    net = xs.ND2 - xs.NA2
+    p = np.where(net < 0, -net, 0.0) * xs.si2
+    n = np.where(net > 0, net, 0.0) * xs.si2
+    dep = np.zeros(xs.si2.shape, float)
+    cap_sum = 0.0
+    xm = 0.5 * (xs.rib_x0 + xs.rib_x1)
+    # lateral junctions, row by row
+    for k in range(len(z)):
+        row = net[:, k] * xs.si2[:, k]
+        sgn = np.sign(row)
+        idx = np.nonzero((np.diff(sgn) != 0) & (sgn[:-1] != 0) & (sgn[1:] != 0))[0]
+        for j in idx:
+            Na = float(-row[max(j - 3, 0)]) if row[j] < 0 else float(-row[min(j + 4, len(row) - 1)])
+            Nd = float(row[min(j + 4, len(row) - 1)]) if row[j] < 0 else float(row[max(j - 3, 0)])
+            if Na <= 0 or Nd <= 0:
+                continue
+            W = _depletion_1d(Na, Nd, V)
+            xj = 0.5 * (xc[j] + xc[j + 1])
+            wp, wn = W * Nd / (Na + Nd), W * Na / (Na + Nd)
+            lo, hi = (xj - wp, xj + wn) if row[j] < 0 else (xj - wn, xj + wp)
+            dep[:, k] = np.maximum(dep[:, k], _frac_inside(xc, dxc, lo, hi))
+            if abs(xj - xm) < 2.0:  # only junctions near the rib store the modulation charge
+                cap_sum += dz / max(W, 1e-3)
+    # vertical junctions, column by column
+    for i in range(len(xc)):
+        col = net[i, :] * xs.si2[i, :]
+        sgn = np.sign(col)
+        idx = np.nonzero((np.diff(sgn) != 0) & (sgn[:-1] != 0) & (sgn[1:] != 0))[0]
+        for j in idx:
+            Na = float(-min(col[j], col[j + 1]))
+            Nd = float(max(col[j], col[j + 1]))
+            if Na <= 0 or Nd <= 0:
+                continue
+            W = _depletion_1d(Na, Nd, V)
+            zj = 0.5 * (z[j] + z[j + 1])
+            wa = W * Nd / (Na + Nd)  # extent into the p side
+            wd = W * Na / (Na + Nd)
+            lo, hi = (zj - wa, zj + wd) if col[j] < 0 else (zj - wd, zj + wa)
+            dep[i, :] = np.maximum(dep[i, :], _frac_inside(z, dz, lo, hi))
+            if abs(xc[i] - xm) < xs.rib_w:
+                cap_sum += dxc / max(W, 1e-3)
+    dep *= xs.si2
+    p = p * (1.0 - dep)
+    n = n * (1.0 - dep)
+    return p, n, dep, cap_sum
+
+
 def toy_physics(geom: Geometry, cfg, noise: float = 0.0, rng: Optional[np.random.Generator] = None) -> PNResult:
     a = cfg.active
     xs = parse_xsection(geom, cfg)
-    x, dx = xs.x, float(xs.x[1] - xs.x[0])
-    I = mode_weight(xs)
-    in_rib = (x >= xs.rib_x0) & (x <= xs.rib_x1)
+    xc, z = xs.xc, xs.z
+    dA = (xc[1] - xc[0]) * (z[1] - z[0])
+    I = mode_weight_2d(xs)
+    in_rib = ((xc >= xs.rib_x0) & (xc <= xs.rib_x1))[:, None]
     V = np.asarray(a.v_list, float)
 
-    def carriers(Vb):
-        xp, xn, W, Na, Nd = depletion(xs, Vb)
-        p = np.where(xs.net < 0, -xs.net, 0.0)
-        n = np.where(xs.net > 0, xs.net, 0.0)
-        dep = np.zeros_like(x, bool) if not np.isfinite(xp) else (x >= xp) & (x <= xn)
-        p[dep] = 0.0
-        n[dep] = 0.0
-        return p, n, dep, W
-
-    p0, n0, dep0, _ = carriers(0.0)
+    p0, n0, dep0, _ = _carriers_2d(xs, 0.0)
     dn_core, dn_slab, a_p, a_n, a_ct, Cs, Ws = [], [], [], [], [], [], []
     d_ct = _contact_distance(xs)
     for Vb in V:
-        p, n, dep, W = carriers(Vb)
+        p, n, dep, cap_sum = _carriers_2d(xs, Vb)
         removed_h, removed_e = np.clip(p0 - p, 0, None), np.clip(n0 - n, 0, None)
         dn = -soref_dn(removed_e, removed_h) * I * GAMMA_SI  # positive: carriers removed
-        dn_core.append(float(_trapz(dn * in_rib, x)))
-        dn_slab.append(float(_trapz(dn * ~in_rib, x)))
-        a_p.append(4.343 * GAMMA_SI * float(_trapz(soref_dalpha_cm(0 * n, p) * I, x)))
-        a_n.append(4.343 * GAMMA_SI * float(_trapz(soref_dalpha_cm(n, 0 * p) * I, x)))
+        dn_core.append(float((dn * in_rib).sum() * dA))
+        dn_slab.append(float((dn * ~in_rib).sum() * dA))
+        a_p.append(4.343 * GAMMA_SI * float((soref_dalpha_cm(0 * n, p) * I).sum() * dA))
+        a_n.append(4.343 * GAMMA_SI * float((soref_dalpha_cm(n, 0 * p) * I).sum() * dA))
         a_ct.append(200.0 * np.exp(-d_ct / 0.12) if np.isfinite(d_ct) else 0.0)
-        xj = xs.junction_x()
-        h_j = xs.rib_h if (xj is not None and xs.rib_x0 + 0.02 < xj < xs.rib_x1 - 0.02) else max(xs.slab_h, 1e-3)
-        Cs.append(1.2 * EPS_SI * (h_j * 1e-6) / max(W * 1e-6, 5e-9) * 1e9)  # F/m -> fF/um (x1e15 / 1e6)
-        Ws.append(W)
+        Cs.append(1.2 * EPS_SI * cap_sum * 1e9)  # F/m -> fF/um
+        # effective depletion width: depleted silicon area near the rib / core height
+        near = dep * (np.abs(xc - 0.5 * (xs.rib_x0 + xs.rib_x1)) < xs.rib_w)[:, None]
+        Ws.append(float(near.sum() * dA / xs.rib_h))
     dn_core, dn_slab = np.array(dn_core), np.array(dn_slab)
     a_p, a_n, a_ct = np.array(a_p), np.array(a_n), np.array(a_ct)
     a_bg = np.full_like(V, ALPHA_BACKGROUND_DB_CM)
 
-    # series resistance x length: integrate resistivity / height from the depletion edges to the contacts
+    # series resistance x length along the slab mid-height from the depletion edges to the contacts
+    x, dx = xs.x, float(xs.x[1] - xs.x[0])
     xp, xn, _, _, _ = depletion(xs, a.v_ref)
     R = 0.0
     for side, (lo, hi) in (("p", (xs.contacts.get("anode", (xs.si_x0, xs.si_x0))[1], xp)), ("n", (xn, xs.contacts.get("cathode", (xs.si_x1, xs.si_x1))[0]))):
@@ -433,6 +552,14 @@ class PNPhaseShifter(Family):
                 f[f"d_ct_{side}"] = float("nan")
         xp, xn, W, _, _ = depletion(xs, cfg.active.v_ref)
         f["W_dep_vref"] = W
+        # junction shape: fraction of rib rows with a lateral sign change / rib columns with a vertical one
+        net = (xs.ND2 - xs.NA2) * xs.si2
+        rib_cols = (xs.xc >= xs.rib_x0) & (xs.xc <= xs.rib_x1)
+        sub = net[rib_cols, :]
+        lat = np.mean([(np.diff(np.sign(sub[:, k])) != 0).any() for k in range(sub.shape[1])]) if sub.size else 0.0
+        ver = np.mean([(np.diff(np.sign(sub[i, :])) != 0).any() for i in range(sub.shape[0])]) if sub.size else 0.0
+        f["lateral_junction_frac"] = float(lat)
+        f["vertical_junction_frac"] = float(ver)
         return f
 
     # -- checks ---------------------------------------------------------------------

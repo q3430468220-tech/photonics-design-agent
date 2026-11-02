@@ -76,12 +76,24 @@ def run_drc(geom: Geometry, cfg: SimConfig) -> List[Violation]:
     if narrow_area > 0.25 * cfg.min_width**2:
         v.append(Violation("min_width", f"features narrower than {cfg.min_width} um (area {narrow_area:.4f} um^2)", _centroid(narrow, r)))
 
-    # min gap: pixels added by a closing of half-width min_gap/2
+    # min gap: pixels added by a closing of half-width min_gap/2. A genuine slit between two
+    # features is long (>= 2 x min_gap in some direction) -> error; the small acute notches
+    # where overlapping shapes meet at an angle are only a warning (fabrication rounds them).
     k_g = int(math.ceil(cfg.min_gap / 2 / r.dx))
     gap = closing(r.mask, k_g) & ~r.mask
     gap_area = gap.sum() * px_area
     if gap_area > 0.25 * cfg.min_gap**2:
-        v.append(Violation("min_gap", f"gaps narrower than {cfg.min_gap} um (area {gap_area:.4f} um^2)", _centroid(gap, r)))
+        labels, n = label_components(gap, max_components=32)
+        long_slit = False
+        for i in range(1, n + 1):
+            iy, ix = np.nonzero(labels == i)
+            if max(ix.max() - ix.min(), iy.max() - iy.min()) * r.dx >= 2 * cfg.min_gap:
+                long_slit = True
+                break
+        if long_slit or n >= 32:
+            v.append(Violation("min_gap", f"gaps narrower than {cfg.min_gap} um (area {gap_area:.4f} um^2)", _centroid(gap, r)))
+        else:
+            v.append(Violation("min_gap", f"acute notches narrower than {cfg.min_gap} um where shapes meet (area {gap_area:.4f} um^2)", _centroid(gap, r), "warning"))
 
     # min area per connected island / connectivity (coarse grid: labelling is the slow part)
     rc = rasterize(geom, max(cfg.raster_dx * 5, 0.05), pad=0.1)

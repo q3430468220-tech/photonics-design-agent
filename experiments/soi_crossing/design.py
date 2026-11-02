@@ -15,6 +15,11 @@ Helpers available from prism_min.geometry:
   rotated(poly, angle_deg)             rotate about the origin
   four_fold(polys)                     replicate under 0/90/180/270 deg rotations
   Polygon(points), Port(name, center, width, orientation), Geometry(polys, ports)
+and from prism_min.shapes (curved / periodic structures):
+  arc(radius, angle, width, start, start_angle)   euler_bend(radius, angle, width, ...)
+  sbend(length, offset, width)   bezier_path(control_points, width or [w0..wn])
+  path_to_polygon(points, widths)   annulus(radius, width, center)
+  periodic_array(poly, pitch, n, angle)   mirrored(poly, "x"|"y")
 
 Starting point: a plain crossing of two 0.5 um waveguides, arms 5 um long.
 """

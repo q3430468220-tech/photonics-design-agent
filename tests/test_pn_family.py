@@ -103,6 +103,32 @@ class TestPNFamily(unittest.TestCase):
         self.assertEqual(classify_change(xsec(), xsec(w=0.45)), "geometry:parameter")
 
 
+def l_junction(Na=5e17, Nd=5e17, X=3.0, w=0.5, h=0.22, slab=0.09, d_pp=0.8, d_ct=1.2, zL=0.11, xL=0.1):
+    """L-shaped junction: p on the left and under the rib centre, n on the right and above it."""
+    polys = [
+        xz_rect(-X, X, 0, slab, "SI"), xz_rect(-w / 2, w / 2, 0, h, "SI"),
+        xz_rect(-X, -xL, 0, h, "P", doping=Na, dopant="p"), xz_rect(-xL, xL, 0, zL, "P", doping=Na, dopant="p"),
+        xz_rect(xL, X, 0, h, "N", doping=Nd, dopant="n"), xz_rect(-xL, xL, zL, h, "N", doping=Nd, dopant="n"),
+        xz_rect(-X, -w / 2 - d_pp, 0, h, "P++", doping=1e20, dopant="p"), xz_rect(w / 2 + d_pp, X, 0, h, "N++", doping=1e20, dopant="n"),
+        xz_rect(-w / 2 - d_ct - 0.5, -w / 2 - d_ct, slab, slab + 0.3, "METAL", terminal="anode"),
+        xz_rect(w / 2 + d_ct, w / 2 + d_ct + 0.5, slab, slab + 0.3, "METAL", terminal="cathode"),
+    ]
+    return Geometry(polys, [], plane="xz")
+
+
+class TestJunctionShapes(unittest.TestCase):
+    def test_l_junction_trades_vpil_for_capacitance(self):
+        b = get_backend("mock_pn")
+        lat = FAM.decompose(b.run(xsec(), CFG), CFG).summary()
+        lj = FAM.decompose(b.run(l_junction(), CFG), CFG).summary()
+        self.assertLess(lj["VpiL_Vcm"], lat["VpiL_Vcm"], "L-junction: more depletion-mode overlap")
+        self.assertGreater(lj["C_fF_um"], lat["C_fF_um"], "L-junction: more junction area -> more C")
+        f = FAM.features(l_junction(), CFG)
+        self.assertGreater(f["vertical_junction_frac"], 0.1)
+        self.assertEqual([v.rule for v in FAM.check(l_junction(), CFG) if v.severity == "error"], [])
+        self.assertEqual(classify_change(xsec(), l_junction()), "doping:topology")
+
+
 class TestPNLoop(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

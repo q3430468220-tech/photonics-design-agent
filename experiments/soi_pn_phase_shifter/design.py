@@ -11,6 +11,12 @@ Contract:  build() -> prism_min.geometry.Geometry(plane="xz")
 
 Helper: prism_min.geometry.xz_rect(x0, x1, z0, z1, layer, **props)
 
+Junction shapes other than a straight lateral junction are drawn with several windows,
+e.g. an L-shaped junction = p on the left AND under the centre, n on the right AND above
+the centre (the judge's toy model resolves lateral and vertical junction segments row by
+row; CHARGE resolves anything). Interleaved junctions vary along the propagation
+direction and cannot be represented in a single cross-section.
+
 Starting point: symmetric 5e17 / 5e17 junction at the rib centre, P++/N++ 0.8 um from the
 rib, contacts 1.2 um from the rib - a textbook lateral PN phase shifter.
 """

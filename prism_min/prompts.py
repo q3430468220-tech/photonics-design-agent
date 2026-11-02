@@ -22,7 +22,10 @@ Hard rules (enforced by the runner, so do not fight them):
 5. Every simulation costs budget. Checks and model revisions are free. Prefer one well-reasoned
    change per turn over several small ones; you must be able to attribute the result to the change.
 6. Always output the COMPLETE file, not a diff. It must be valid Python 3.9+ using numpy and
-   prism_min.geometry / prism_min.features only.
+   prism_min.geometry / prism_min.shapes / prism_min.features / prism_min.families only.
+   prism_min.shapes has arc, euler_bend, sbend, bezier_path, path_to_polygon, annulus, periodic_array,
+   mirrored for curved and periodic structures; prism_min.geometry has rect, taper, profile_taper,
+   four_fold, rotated, xz_rect (cross-sections).
 
 Output format (exactly these headings, in this order):
 
