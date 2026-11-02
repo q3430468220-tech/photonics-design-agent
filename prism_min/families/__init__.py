@@ -66,7 +66,7 @@ def register(cls):
 
 
 def get_family(name: str) -> Family:
-    from . import passive_4port, pn_phase_shifter  # noqa: F401  (register)
+    from . import passive_4port, pn_phase_shifter, pn_ring_modulator  # noqa: F401  (register)
 
     if name not in _FAMILIES:
         raise KeyError(f"unknown device family {name!r}; available: {sorted(_FAMILIES)}")

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -41,10 +41,37 @@ class ActiveConfig:
 
 
 @dataclass
+class RingConfig:
+    """Settings of the `pn_ring_modulator` family (PN cross-section + ring parameters in Geometry.meta)."""
+
+    n_eff0: float = 2.50  # TE0 effective index of the undoped rib at the wavelength
+    n_g: float = 4.00  # group index (sets FSR, Q, photon lifetime)
+    radius_min_um: float = 3.0
+    radius_max_um: float = 50.0
+    gap_min_um: float = 0.10  # DRC: coupler gap
+    gap_max_um: float = 1.00
+    doped_fraction_min: float = 0.1
+    # toy models used by the mock (and by the Lumerical backend for the coupler until an FDTD coupler run exists)
+    bend_loss_A_db_cm: float = 3000.0  # alpha_bend = A exp(-R / R0)
+    bend_loss_R0_um: float = 1.6
+    coupling_k0: float = 0.25  # kappa^2 at gap 0.1 um, R = 10 um (point coupler)
+    coupling_decay_um: float = 0.07
+    # operating point / FOM
+    v_high: float = 0.0  # 'one' state bias
+    v_low: Optional[float] = None  # 'zero' state bias; None -> active.v_ref
+    fom_description: str = "1 - max transmission swing dT between v_high and v_low over wavelength (dimensionless, lower is better)"
+    min_f3db_ghz: float = 25.0  # 1/f^2 = 1/f_RC^2 + 1/f_photon^2
+    max_il_db: float = 3.0  # insertion loss of the 'one' state at the operating wavelength
+    min_er_db: float = 3.0
+    improve_threshold_abs: float = 0.01  # dT must improve by more than this
+
+
+@dataclass
 class SimConfig:
     # ---- device family -------------------------------------------------------
-    device_family: str = "passive_4port"  # passive_4port | pn_phase_shifter
+    device_family: str = "passive_4port"  # passive_4port | pn_phase_shifter | pn_ring_modulator
     active: ActiveConfig = field(default_factory=ActiveConfig)
+    ring: RingConfig = field(default_factory=RingConfig)
 
     # ---- physics / band ----------------------------------------------------
     wl_min: float = 1.53  # um
@@ -118,6 +145,16 @@ class SimConfig:
 
     def summary_for_agent(self) -> str:
         """Human-readable summary shown to the agent (read-only)."""
+        if self.device_family == "pn_ring_modulator":
+            a, r = self.active, self.ring
+            v_low = a.v_ref if r.v_low is None else r.v_low
+            return (
+                f"family pn_ring_modulator = PN cross-section (as pn_phase_shifter: lambda {a.wavelength} um, Si core {a.core_height*1000:.0f} nm, "
+                f"slab {a.slab_height*1000:.0f} nm, bias list {a.v_list} V) + ring parameters in Geometry.meta: radius_um in "
+                f"[{r.radius_min_um}, {r.radius_max_um}], gap_um in [{r.gap_min_um}, {r.gap_max_um}], doped_fraction in [{r.doped_fraction_min}, 1]; "
+                f"n_g {r.n_g}; states v_high {r.v_high} V / v_low {v_low} V; FOM = {r.fom_description}; constraints: f_3dB >= {r.min_f3db_ghz} GHz, "
+                f"IL(one state) <= {r.max_il_db} dB, ER >= {r.min_er_db} dB; keep only if dT improves by > {r.improve_threshold_abs}; budget {self.max_sims} sims."
+            )
         if self.device_family == "pn_phase_shifter":
             a = self.active
             return (

@@ -481,3 +481,51 @@ class LumericalChargeFDE(Backend):
         dx = float(xg[1] - xg[0]) * 1e-6
         R = float(np.sum(dx / (sigma[sel] * np.clip(xs.h[sel] * 1e-6, 1e-9, None))))
         return R + 2 * 1e-11 / 0.5e-6
+
+
+@register("lumerical_ring")
+class LumericalRing(LumericalChargeFDE):
+    """pn_ring_modulator backend: the CHARGE + FDE chain above plus one bent-waveguide FDE solve of
+    the undoped structure at the ring radius (alpha_bend = bent loss - straight loss). The bus
+    coupler is still the toy CMT model (`coupling_model = "toy"`); an FDTD coupler run is a
+    planned addition. UNTESTED on a real installation, like the parent class."""
+
+    def run(self, geom: Geometry, cfg: SimConfig, run_dir: Optional[Path] = None):
+        from ..families.pn_ring_modulator import RingResult, ring_params, toy_coupling
+
+        pn = super().run(geom, cfg, run_dir)
+        p = ring_params(geom, cfg)
+        alpha_bend = float("nan")
+        try:
+            m = self.mode()
+            m.switchtolayout()
+            # plain silicon everywhere, bent solve at the ring radius
+            mat_si = "Si (Silicon) - Palik"
+            for i in range(len(geom.by_layer("SI"))):
+                m.setnamed(f"si_{i}", "material", mat_si)
+            m.setanalysis("bent waveguide", 1)
+            m.setanalysis("bend radius", p["radius_um"] * UM)
+            _try(m, ("setanalysis", ("bend location", "simulation center")))
+            n = int(m.findmodes())
+            best, best_te = 1, -1.0
+            for k in range(1, n + 1):
+                te = float(np.real(m.getdata(f"FDE::data::mode{k}", "TE polarization fraction")))
+                if te > best_te:
+                    best, best_te = k, te
+            loss_bent = float(np.real(m.getdata(f"FDE::data::mode{best}", "loss"))) / 100.0  # dB/cm
+            alpha_bend = max(loss_bent - float(pn.alpha_contacts[0]), 0.0)
+            m.switchtolayout()
+            m.setanalysis("bent waveguide", 0)
+        except Exception as e:  # noqa: BLE001
+            pn.extra["bend_solve_error"] = str(e)
+        res = RingResult(
+            **{k: getattr(pn, k) for k in pn.__dataclass_fields__},
+            alpha_bend_db_cm=alpha_bend,
+            kappa2=toy_coupling(p["gap_um"], p["radius_um"], cfg),
+            radius_um=p["radius_um"],
+            gap_um=p["gap_um"],
+            doped_fraction=p["doped_fraction"],
+            coupling_model="toy (CMT) - FDTD coupler run not implemented",
+        )
+        res.backend = "lumerical CHARGE + MODE FDE (+ bent FDE)"
+        return res

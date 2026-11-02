@@ -9,7 +9,7 @@
 ![simulation](https://img.shields.io/badge/simulation-Lumerical%20FDTD%20%7C%20CHARGE%20%7C%20FDE-orange)
 ![devices](https://img.shields.io/badge/devices-passive%20%7C%20active-2b6cb0)
 ![llm](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI--compatible-6f42c1)
-![status](https://img.shields.io/badge/status-v0.2%20alpha-lightgrey)
+![status](https://img.shields.io/badge/status-v0.3%20alpha-lightgrey)
 
 Letting a language model edit a geometry file, run FDTD and keep the result when the number improves is easy to set up and it does find good devices. What it does not give you is understanding: after fifty simulations you have a design and a log of "tried X, got Y", but you cannot say which change mattered, whether the model grasped the physics or stumbled onto the answer, or whether a given simulation was even trustworthy. For a research tool that is the wrong trade. This repository keeps that simple loop (the method is called **PRISM-Min**) and adds three things that are enforced by code, not by prompt: every simulation returns a **loss breakdown with a measured flux closure**, the agent must **register a prediction from its own physics model** before each run and fix the model when it is wrong, and every turn is **tagged with the kind of change it made**, so the optimisation history reads as a sequence of design decisions rather than a random walk.
 
@@ -22,12 +22,16 @@ Letting a language model edit a geometry file, run FDTD and keep the result when
   <img src="docs/images/pn_xsection.png" width="70%" alt="PN phase-shifter cross-section"><br>
   <em>Active family, offline demo: a lateral PN phase shifter (VπL × α at −2 V) improved from 23 to 13.5 V dB by doping, junction, rib-width and implant changes; purple edges mark doping-domain changes. Below: the cross-section the agent edits (red p, blue n, darker = heavier; contacts in gold).</em>
 </p>
+<p align="center">
+  <img src="docs/images/evolution_ring_demo.png" width="94%" alt="Evolution chart, ring modulator demo"><br>
+  <em>Ring level, offline demo: a PN microring modulator judged on its transmission swing between 0 V and −2 V under a 20 GHz bandwidth constraint. The agent trades coupling (Q_L) against photon lifetime, then buys shift per volt with an L-shaped junction and heavier doping; experiment 7 had the best swing but is rejected because f_3dB fell to 19.6 GHz, and the chart says so.</em>
+</p>
 
 ## What is inside
 
 The code has four parts plus a device-family layer. Each one can be replaced on its own.
 
-**Device families** (`prism_min/families/`) hold everything that depends on *what* is being designed: how a geometry is measured, which rules it must obey, how a simulation result is decomposed, what the FOM and the constraints are, and how a result is summarised for the agent. Two families ship. `passive_4port` is a layout (plane *xy*) with four ports — crossings, and with small changes bends, tapers, MMIs — judged by FDTD. `pn_phase_shifter` is an *xz* cross-section of a lateral PN junction — rib, slab, implant windows with concentrations, metal contacts — judged by CHARGE + FDE; its FOM is VπL × α at a reference bias with an RC-bandwidth constraint. Adding a family (TFLN MZM, thermo-optic shifter, photodetector) means writing one module; the loop, guard, journal and chart do not change.
+**Device families** (`prism_min/families/`) hold everything that depends on *what* is being designed: how a geometry is measured, which rules it must obey, how a simulation result is decomposed, what the FOM and the constraints are, and how a result is summarised for the agent. Three families ship. `passive_4port` is a layout (plane *xy*) with four ports — crossings, and with small changes bends, tapers, MMIs — judged by FDTD. `pn_phase_shifter` is an *xz* cross-section of a PN junction — rib, slab, implant windows with concentrations (lateral, offset, L-shaped or vertical junctions are all just several windows), metal contacts — judged by CHARGE + FDE; its FOM is VπL × α at a reference bias with an RC-bandwidth constraint. `pn_ring_modulator` is that cross-section plus three ring parameters in `Geometry.meta` (radius, coupler gap, doped fraction); the judge adds the Q budget (coupling, bend, free-carrier, background), the resonance shift per volt, the two-state transmission spectra and the swing, ER and IL at the best wavelength, and the bandwidth from the photon lifetime and RC in quadrature. Adding a family (TFLN MZM, thermo-optic shifter, photodetector) means writing one module; the loop, guard, journal and chart do not change.
 
 **The judge** (`prism_min/evaluate.py`, `checks.py`, `decompose.py`, `guard.py`) is the part the agent cannot touch. It builds the geometry from `design.py`, runs DRC (minimum width, gap, area, port placement) and simulation-sanity checks (mesh resolution, uniform port straights, four-fold symmetry), refuses to simulate unless a prediction has been registered for exactly this geometry, runs the backend, splits the result into through-port fundamental mode, higher-order modes, crosstalk, reflection and radiation, and voids the run if the measured flux through a box around the device is not 1 within tolerance. All numerical settings come from a locked `sim_config.py` whose hash is written into every record.
 
@@ -55,6 +59,14 @@ The code has four parts plus a device-family layer. Each one can be replaced on 
 | `alpha_contacts` | loss of the undoped structure: metal and substrate leakage |
 | `C_fF_um(V)`, `R_ohm_m` | junction capacitance per length (dQ/dV), series resistance × length → f_RC = 1/(2πRC) |
 | closure | perturbation terms must reproduce the full-solve dneff and α within `closure_tol` |
+
+| what the ring level adds (pn_ring_modulator) | meaning |
+|---|---|
+| `alpha_rt = bend + background + contacts + f·FCA` → `Q_i` terms | round-trip loss budget; `Q_bend`, `Q_fca`, `Q_bg`, `Q_contacts`, `Q_c` from κ²(gap, R); 1/Q_L = 1/Q_c + 1/Q_i |
+| `shift_pm_per_V` | resonance shift λ·f·dneff/n_g per volt |
+| `dT_max`, `ER_dB`, `IL_dB` | all-pass spectra of the 'one' (v_high) and 'zero' (v_low) states; swing, extinction and insertion loss at the best wavelength; FOM = 1 − dT_max |
+| `f_3dB_GHz` | 1/f² = 1/f_RC² + 1/f_photon², f_photon = 1/(2πτ), τ = Q_L λ/(2πc) |
+| closure | Q_L from the FWHM of the computed dip vs 1/Q_c + 1/Q_i, plus the phase-shifter closure |
 
 ```mermaid
 flowchart LR
@@ -84,6 +96,7 @@ pip install -e .
 # 2. watch the loop run with no API key and no simulator (scripted agent, toy backends, ~10 s each)
 python examples/demo_scripted.py          # passive: crossing      -> examples/demo_evolution.png
 python examples/demo_pn_scripted.py       # active: PN shifter     -> examples/demo_pn_evolution.png
+python examples/demo_ring_scripted.py     # ring: PN microring     -> examples/demo_ring_evolution.png
 
 # 3. configure an LLM (and Lumerical)
 cp .env.example .env                      # ANTHROPIC_API_KEY  or  OPENAI_API_KEY + OPENAI_BASE_URL
@@ -91,7 +104,8 @@ cp .env.example .env                      # ANTHROPIC_API_KEY  or  OPENAI_API_KE
 
 # 4. create an experiment from a template and describe the task
 prism init experiments/my_crossing                                 # passive (default template soi_crossing)
-prism init experiments/my_shifter --template soi_pn_phase_shifter  # active
+prism init experiments/my_shifter --template soi_pn_phase_shifter  # active, phase-shifter cross-section
+prism init experiments/my_ring    --template soi_pn_ring_modulator  # active, microring modulator
 #    edit experiments/my_crossing/program.md      goal, constraints, FOM, budget, hints
 #    edit experiments/my_crossing/design.py       a starting geometry that passes the checks
 #    edit experiments/my_crossing/sim_config.py   only if band / mesh / rules differ
@@ -115,7 +129,7 @@ Without `--real` every command runs on the family's toy backend (`mock` / `mock_
 
 ## Writing an experiment
 
-`program.md` is a task brief for a new graduate student: platform, port interface, what the FOM is, which constraints are hard, how many simulations may be spent, and any hints you are willing to give. The template for the crossing is a good model. `design.py` must define `build() -> Geometry`. For layouts the helpers in `prism_min.geometry` (`rect`, `taper`, `profile_taper`, `four_fold`) cover most single-layer devices; for cross-sections `xz_rect(x0, x1, z0, z1, layer, **props)` draws rib, slab, implant windows (`doping=` in cm⁻³, `dopant=`) and contacts (`terminal=`), and `Geometry(..., plane="xz")` tells the judge which family rules apply. `model.py` must define `predict(geom) -> {"fom", "sigma", ...}`; the template ships a deliberately crude literature prior and the agent is expected to replace it after the first miss. `sim_config.py` is yours and locked: band, mesh, PML margins, DRC rules, FOM thresholds, noise threshold, closure tolerance, budget and gate parameters.
+`program.md` is a task brief for a new graduate student: platform, port interface, what the FOM is, which constraints are hard, how many simulations may be spent, and any hints you are willing to give. The template for the crossing is a good model. `design.py` must define `build() -> Geometry`. For layouts, `prism_min.geometry` (`rect`, `taper`, `profile_taper`, `four_fold`) and `prism_min.shapes` (`arc`, `euler_bend`, `sbend`, `bezier_path`, `path_to_polygon`, `annulus`, `periodic_array`, `mirrored`) cover straight, curved and periodic single-layer devices; for cross-sections `xz_rect(x0, x1, z0, z1, layer, **props)` draws rib, slab, implant windows (`doping=` in cm⁻³, `dopant=`) and contacts (`terminal=`), `Geometry(..., plane="xz")` tells the judge which family rules apply, and for rings `Geometry.meta = {"radius_um", "gap_um", "doped_fraction"}` carries the ring parameters. `model.py` must define `predict(geom) -> {"fom", "sigma", ...}`; the template ships a deliberately crude literature prior and the agent is expected to replace it after the first miss. `sim_config.py` is yours and locked: band, mesh, PML margins, DRC rules, FOM thresholds, noise threshold, closure tolerance, budget and gate parameters.
 
 ## Repository layout
 
@@ -124,22 +138,27 @@ photonics-design-agent/
 ├── pyproject.toml                       pip project (Python >= 3.9; numpy, matplotlib, requests)
 ├── .env.example                         LLM provider / model / Lumerical root
 ├── prism_min/
-│   ├── geometry.py                      Geometry IR: Polygon(layer, props) + Port; rect / taper / profile_taper /
-│   │                                    four_fold / region; raster + morphology (numpy); layer_domain()
+│   ├── geometry.py                      Geometry IR: Polygon(layer, props) + Port, plane xy|xz; rect / taper / profile_taper /
+│   │                                    four_fold / xz_rect; raster + morphology (numpy); layer_domain()
+│   ├── shapes.py                        arc, euler_bend, sbend, bezier_path, path_to_polygon, annulus, periodic_array, mirrored
 │   ├── checks.py                        DRC (width, gap, area, ports) and sanity (mesh, port straights, symmetry)
 │   ├── config.py                        SimConfig (+ ActiveConfig): every locked number, plus its hash
 │   ├── features.py                      passive geometry measurements (junction width, taper adiabaticity …)
 │   ├── families/                        device-specific parts of the judge
 │   │   ├── __init__.py                  Family interface, registry, family_for(cfg)
 │   │   ├── passive_4port.py             crossing & co: features, sanity, breakdown, FOM (wraps decompose/features)
-│   │   └── pn_phase_shifter.py          lateral PN cross-section: parse_xsection, rules, 1-D depletion + Soref toy,
-│   │                                    PNResult / PNBreakdown, VpiL x alpha FOM, f_RC constraint
+│   │   ├── pn_phase_shifter.py          PN cross-section: parse_xsection (2-D doping maps), rules, row-wise depletion +
+│   │   │                                Soref toy (lateral / L-shaped / vertical junctions), PNResult / PNBreakdown,
+│   │   │                                VpiL x alpha FOM, f_RC constraint
+│   │   └── pn_ring_modulator.py         ring level on top: Q budget, shift/V, two-state spectra, swing / ER / IL,
+│   │                                    f_3dB (photon lifetime + RC), FOM = 1 - dT
 │   ├── backends/
 │   │   ├── base.py                      SimResult (passive flux data), Backend, registry
-│   │   ├── mock.py / mock_pn.py         analytic toys for the two families
+│   │   ├── mock.py / mock_pn.py / mock_ring.py   analytic toys for the three families
 │   │   ├── lumerical.py                 FDTD through lumapi: structures, source, monitors, flux box, field plot
 │   │   └── lumerical_charge_fde.py      CHARGE sweep -> charge.mat -> FDE np-density -> n_eff(V), loss(V);
-│   │                                    perturbation integrals and R x L from the carriers (python side)
+│   │                                    perturbation integrals and R x L from the carriers (python side);
+│   │                                    + LumericalRing: bent-waveguide FDE solve for alpha_bend (coupler still analytic)
 │   ├── decompose.py                     passive breakdown, closure check, FOM + constraints
 │   ├── guard.py                         PredictionRegistry: one registered prediction per geometry hash
 │   ├── evaluate.py                      build → checks → guard → simulate → closure → score
@@ -152,9 +171,11 @@ photonics-design-agent/
 │   └── cli.py                           prism init | check | eval | run | status | plot | review
 ├── experiments/
 │   ├── soi_crossing/                    passive template: 220 nm SOI crossing, IL < 0.06 dB
-│   └── soi_pn_phase_shifter/            active template: lateral PN shifter, VpiL x alpha < 20 V dB, f_RC > 40 GHz
+│   ├── soi_pn_phase_shifter/            active template: PN shifter, VpiL x alpha < 20 V dB, f_RC > 40 GHz
+│   └── soi_pn_ring_modulator/           ring template: max swing at 2 V with f_3dB >= 20 GHz, IL <= 3 dB, ER >= 3 dB
 ├── examples/demo_scripted.py            offline demonstration, passive (scripted LLM + mock)
-├── examples/demo_pn_scripted.py         offline demonstration, active (scripted LLM + mock_pn)
+├── examples/demo_pn_scripted.py         offline demonstration, PN shifter (scripted LLM + mock_pn)
+├── examples/demo_ring_scripted.py       offline demonstration, ring modulator (scripted LLM + mock_ring)
 ├── docs/images/                         figures used in this README
 ├── tests/                               unittest: geometry, checks, decomposition, guard, parser, both families, full loops
 └── ROADMAP.md  CONTRIBUTING.md  CITATION.cff  LICENSE
@@ -180,9 +201,11 @@ experiments/my_crossing/
 | 0 · loop | judge, guard, breakdown + closure, design / model turns, understanding gate, journal, evolution chart, mock backend, tests | **v0.1** |
 | 1 · real simulations | Lumerical FDTD backend validated on the crossing; CHARGE + FDE backend validated on the PN shifter; finer-mesh re-check of kept designs | both written, **not yet validated** |
 | 2 · evidence | same loop with breakdown / prediction / gate switched off as a baseline; random search and CMA-ES on the same parametrisation; prediction-miss distribution as the understanding metric | planned |
-| 3 · passive library | geometry helpers (arcs, Euler bends, Bézier, periodic arrays), templates for bends, tapers, MMIs, directional couplers | planned |
-| 4 · active devices | lateral PN phase-shifter family (CHARGE + FDE, VπL × α, f_RC) | **v0.2** (mock-tested) |
-| | ring level on top of the shifter (1/Q = 1/Q_c + 1/Q_int, ER/IL from Q_c/Q_int, photon-lifetime limit); TFLN MZM family (VπL ∝ g/(n³ r₃₃ Γ), RF-loss / velocity / impedance limits); thermo-optic shifter | planned |
+| 3 · passive library | geometry helpers (arcs, Euler bends, Bézier, S-bends, rings, periodic arrays) | **v0.3** |
+| | templates for bends, tapers, MMIs, directional couplers (2-port family) | planned |
+| 4 · active devices | PN phase-shifter family (CHARGE + FDE, VπL × α, f_RC); lateral, L-shaped and vertical junctions in the toy | **v0.3** (mock-tested) |
+| | ring level: Q budget, shift/V, two-state spectra, swing / ER / IL, photon-lifetime + RC bandwidth; bent FDE for α_bend | **v0.3** (mock-tested; coupler still analytic) |
+| | FDTD coupler run for κ²; TFLN MZM family (VπL ∝ g/(n³ r₃₃ Γ), RF-loss / velocity / impedance limits); thermo-optic shifter | planned |
 | 5 · search | adjoint polish of continuous parameters inside a structure chosen by the agent; multi-fidelity screening; an archive of structurally different candidates | planned |
 
 See [ROADMAP.md](ROADMAP.md) for details.
@@ -193,7 +216,7 @@ The agent edits exactly one file per turn and nothing else; what it may do is en
 
 ## Status and limitations
 
-This is an alpha. The loop, the judge, both families and the bookkeeping are covered by 32 tests and run end to end on the mock backends. Neither Lumerical backend has been executed on a real installation yet: `lumerical.py` was written against lumapi conventions for FDTD 2023–2025, `lumerical_charge_fde.py` is a port of working CHARGE/FDE `.lsf` scripts; expect material names, result keys and one or two property strings to need a fix each. The PN toy model is a 1-D abrupt-junction approximation with an analytic mode profile: its trends are right, its numbers are not, and it cannot represent interleaved or vertical junctions. The change classifier works from the through-arm width profile and from layer names and polygon properties; it is a cross-check on the agent's declaration, not a ground truth. The mock backend is a toy and no physics should be read from it. Agent-written `design.py` and `model.py` are executed with your privileges, as in any autoresearch-style loop.
+This is an alpha. The loop, the judge, the three families and the bookkeeping are covered by 43 tests and run end to end on the mock backends. Neither Lumerical backend has been executed on a real installation yet: `lumerical.py` was written against lumapi conventions for FDTD 2023–2025, `lumerical_charge_fde.py` is a port of working CHARGE/FDE `.lsf` scripts; expect material names, result keys and one or two property strings to need a fix each. The PN toy model is a row-wise abrupt-junction approximation with an analytic mode profile: its trends are right, its numbers are not; it handles lateral, offset, L-shaped and vertical junctions but not interleaved ones (they vary along the propagation direction). The ring coupler is an analytic point-coupler model in both the mock and the Lumerical backend until an FDTD coupler run is added. The change classifier works from the through-arm width profile and from layer names and polygon properties; it is a cross-check on the agent's declaration, not a ground truth. The mock backend is a toy and no physics should be read from it. Agent-written `design.py` and `model.py` are executed with your privileges, as in any autoresearch-style loop.
 
 ## Disclaimer
 

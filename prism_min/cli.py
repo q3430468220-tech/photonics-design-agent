@@ -70,7 +70,7 @@ def cmd_check(a):
     print("checks: ", format_violations(fam.check(geom, cfg)))
     try:
         p = exp.predict(geom)
-        print(f"model.py predicts FOM {p['fom']:.4f} +- {p['sigma']:.4f} dB  ({p.get('notes','')})")
+        print(f"model.py predicts FOM {p['fom']:.4g} +- {p['sigma']:.3g} {fam.fom_unit}  ({p.get('notes','')})")
     except DesignError as e:
         print(f"model.py: {e}")
     if a.plot:

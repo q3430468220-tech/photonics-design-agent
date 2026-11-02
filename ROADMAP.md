@@ -35,7 +35,8 @@ The project grows in the order in which evidence can be collected: first a loop 
 
 | item | content | status |
 |---|---|---|
-| geometry helpers | arcs, Euler bends, Bézier edges, periodic arrays, boolean union, `from_gdsfactory` tested | planned |
+| geometry helpers | `shapes.py`: arc, Euler bend (clothoid), S-bend, Bézier path, path_to_polygon, annulus, periodic_array, mirrored; acute-notch DRC warning | v0.3 |
+| more helpers | boolean union, `from_gdsfactory` tested | planned |
 | templates | 90° bend (vs. the Flexcompute SiN benchmark), edge-coupler taper, 1×2 MMI, directional coupler | planned |
 | 2.5D screening | varFDTD backend as a cheap first pass; promote to 3D only when the coarse result improves | planned |
 
@@ -46,7 +47,9 @@ The project grows in the order in which evidence can be collected: first a loop 
 | device-family layer | `families/`: features, rules, decomposition, FOM, summary per device kind; passive code wrapped as `passive_4port` | v0.2 |
 | PN phase-shifter family | x-z cross-section IR (`xz_rect`, implant windows with concentrations, contacts with terminals); rules (contact / heavy-doping distance, ohmic contact, junction in rib); 1-D depletion + Soref toy (`mock_pn`); breakdown dneff core/slab, α p/n/contacts/background, C, R, f_RC; FOM VπL × α; template `soi_pn_phase_shifter`; demo + 6 tests | v0.2 |
 | CHARGE + FDE backend | `lumerical_charge_fde.py`: CHARGE sweep with Masetti/high-field/Slotboom, charge export, FDE with np-density, undoped reference solve, python-side perturbation integrals and R × L | written, **not validated** |
-| ring level | 1/Q = 1/Q_c + 1/Q_bend + 1/Q_scatter + 1/Q_FCA from the shifter result + a bend/coupler FDTD; ER and IL from Q_c/Q_int; 1/f² ≈ 1/f_RC² + 1/f_photon² | planned |
+| junction shapes | row-wise 2-D depletion in the toy: lateral, offset, L-shaped, vertical junctions; sub-cell edge resolution; junction-shape features | v0.3 |
+| ring level | `pn_ring_modulator`: Q budget (Q_c, Q_bend, Q_fca, Q_bg, Q_contacts), shift/V, two-state all-pass spectra, swing / ER / IL, f_3dB from photon lifetime + RC, energy/bit; FOM = 1 − dT; `mock_ring`; `LumericalRing` (bent FDE for α_bend, analytic coupler); template, demo, 4 tests | v0.3 |
+| coupler | FDTD / varFDTD run of the bus coupler for κ²(gap, R) replacing the analytic model | planned |
 | more families | TFLN MZM (VπL ∝ g / n³ r₃₃ Γ; RF loss, velocity and impedance mismatch limits), thermo-optic shifter (HEAT + FDE), Ge photodetector (FDTD generation → CHARGE) | planned |
 
 ## Stage 5 — search

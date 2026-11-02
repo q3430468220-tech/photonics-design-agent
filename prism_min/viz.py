@@ -113,7 +113,7 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
     unit = fam.fom_unit if fam else ""
     ylabel = ("FOM: " + fam.fom_label) if fam else "FOM (lower is better)"
 
-    xs, ys, kinds, domains, decisions, labels, iters = [], [], [], [], [], [], []
+    xs, ys, kinds, domains, decisions, labels, iters, viols = [], [], [], [], [], [], [], []
     for i, e in enumerate(sims, start=1):
         dom, kind = split_change_type(e.get("change_type") or "unspecified")
         xs.append(i)
@@ -121,6 +121,7 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
         kinds.append(kind)
         domains.append(dom)
         decisions.append(e.get("decision") if e.get("valid") else "void")
+        viols.append(list(e.get("constraint_violations") or []) if e.get("valid") and not e.get("constraints_ok") else [])
         lab = e.get("label") or (e.get("change") or "")[:40]
         if dom not in ("geometry",) and kind not in ("baseline", "unspecified"):
             lab = f"{dom} | {lab}"
@@ -155,14 +156,23 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
     if best_x:
         ax.step(best_x, best_y, where="post", color=KEEP_COLOR, lw=2, zorder=2, label="best so far")
 
-    for x, y, k, dom, d in zip(xs, ys, kinds, domains, decisions):
+    best_so_far = None
+    for x, y, k, dom, d, vl in zip(xs, ys, kinds, domains, decisions, viols):
         m = MARKERS.get(k, "o")
         if d == "void":
             ax.scatter([x], [void_y], marker="x", s=46, color=VOID_COLOR, zorder=3)
             continue
         if d == "keep":
+            best_so_far = y
             edge = DOMAIN_EDGE.get(dom, "black")
             ax.scatter([x], [y], marker=m, s=58, facecolor=KEEP_COLOR, edgecolor=edge, lw=0.8 if edge == "black" else 1.8, zorder=4)
+        elif vl and best_so_far is not None and y < best_so_far:
+            # better FOM but rejected for a constraint: say which one, otherwise the chart lies
+            ax.scatter([x], [y], marker=m, s=46, facecolor="none", edgecolor=DISCARD_COLOR, lw=1.3, zorder=3)
+            ax.scatter([x], [y], marker="x", s=30, color=DISCARD_COLOR, zorder=4)
+            ax.annotate("rejected: " + vl[0].split(">")[0].split("<")[0].strip() + (" < " if "<" in vl[0] else " > ") + vl[0].split(">" if ">" in vl[0] else "<")[-1].strip(),
+                        (x, y), xytext=(6, -14), textcoords="offset points", fontsize=6.8, color=DISCARD_COLOR, ha="left", va="center",
+                        bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "none", "alpha": 0.75}, zorder=5)
         else:
             ax.scatter([x], [y], marker=m, s=46, facecolor="none", edgecolor=DISCARD_COLOR, lw=1.3, zorder=3)
 
@@ -221,6 +231,7 @@ def plot_evolution(entries: List[dict], path: Path, cfg=None, title: Optional[st
         Line2D([], [], marker="o", ls="", markerfacecolor=KEEP_COLOR, markeredgecolor="black", label="kept"),
         Line2D([], [], marker="o", ls="", markerfacecolor="none", markeredgecolor=DISCARD_COLOR, label="discarded"),
         Line2D([], [], marker="x", ls="", color=VOID_COLOR, label="voided (closure failed)"),
+        Line2D([], [], marker="x", ls="", color=DISCARD_COLOR, label="better FOM, rejected by a constraint"),
         Line2D([], [], marker="o", ls="", markerfacecolor="#dddddd", markeredgecolor="black", label="parameter change"),
         Line2D([], [], marker="s", ls="", markerfacecolor="#dddddd", markeredgecolor="black", label="shape change (same elements)"),
         Line2D([], [], marker="D", ls="", markerfacecolor="#dddddd", markeredgecolor="black", label="topology change (elements added/replaced)"),

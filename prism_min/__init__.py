@@ -5,4 +5,4 @@ registered -> simulate -> loss breakdown + closure -> keep/revert -> journal.
 One rule: prediction miss > 2 sigma  =>  next turn revises model.py, not the design.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
