@@ -1,228 +1,164 @@
-# photonics-design-agent (PRISM-Min)
+# photonics-design-agent
 
-**A minimal, attribution-capable LLM agent loop for photonic device design.**
-Predict → simulate → decompose the loss → keep or revert → journal.
-One rule: if the measurement misses the prediction by more than 2σ, the agent must fix its
-*model*, not the design.
+An LLM agent that designs passive photonic devices by running simulations in a loop,
+and that has to **explain its reasoning before each simulation**.
 
-[中文说明 (README_zh.md)](README_zh.md)
+Method name: PRISM-Min. Status: v0.1, loop verified on a toy backend; Lumerical backend
+written but not yet validated. Chinese: [README_zh.md](README_zh.md).
 
----
+![evolution](examples/demo_evolution.png)
 
-## What it is
+## The problem
 
-PRISM-Min is the "autoresearch"-style design loop (human writes `program.md`, agent edits a
-Python file, a simulator judges, keep/discard) with three additions and two rules that turn a
-black-box search into something whose every step can be attributed:
+You can already let an LLM edit a geometry file, run FDTD, and keep the result if the number
+got better. That works, but you learn nothing from it: 50 simulations later you have a good
+design and a pile of "tried X, got Y" notes. You cannot tell which change mattered, whether
+the agent understood the physics or got lucky, or whether the simulation itself was trustworthy.
 
-| | Figure-style agent loop | PRISM-Min |
-|---|---|---|
-| Feedback per simulation | one scalar FOM | FOM **plus a loss breakdown**: through-TE0, higher-order, crosstalk, reflection, radiation, and a measured **closure** (flux box ≈ 1) |
-| Before simulating | nothing | `model.py` must **register a prediction** (FOM ± σ); the judge refuses to run without one |
-| Memory | narrative journal | structured journal (predicted vs measured, breakdown, features) + `model.py` (understanding as code) + `laws.md` (lessons with evidence) |
-| Rule 1 | — | prediction miss > 2σ ⇒ next turn is a **model turn** (edit `model.py` only) |
-| Rule 2 | — | **understanding gate**: `model.py` must predict most recent runs within 2σ (and σ may not be inflated) before more simulations are spent |
+This project keeps that loop and adds three things:
 
-Everything the agent is *allowed* to do is enforced by the runner, not by the prompt: it edits
-exactly one file per turn, cannot touch simulation settings or the FOM, and a failed closure
-voids the run instead of scoring it.
+1. **Loss breakdown instead of one number.** Each simulation returns where the power went
+   (through-port fundamental mode, higher-order modes, crosstalk, reflection, radiation) and a
+   measured flux-closure check. The agent sees *which* channel to attack.
+2. **Prediction before measurement.** The agent maintains `model.py`, a small physics model it
+   wrote itself. It must predict the result (with an uncertainty) before every simulation. If
+   the measurement misses by more than 2σ, the next turn is spent fixing `model.py`, not the
+   design.
+3. **A record of what was done and why.** Every turn declares its change type (parameter /
+   shape / topology) and a one-line label. The evolution chart above is built from that.
+
+The runner enforces these rules in code. The agent cannot change simulation settings, cannot
+skip the prediction, and cannot score a run whose closure failed.
+
+## How it works
 
 ```
-                 human: program.md  (goal, constraints, FOM, budget)
-                        sim_config.py (LOCKED: mesh, PML, band, FOM thresholds)
-                                    │
-   ┌────────────────────────────────▼─────────────────────────────────┐
-   │  DESIGN turn: LLM reads program + design.py + model.py + laws +   │
-   │  journal digest + last breakdown  →  hypothesis, change, new      │
-   │  design.py                                                        │
-   │         │  build()  →  DRC + sanity  (fail ⇒ revert, no sim)      │
-   │         │  model.py.predict(geom) → registered  (guard)           │
-   │         ▼                                                         │
-   │  SIMULATE (mock | Lumerical FDTD)  →  flux at 4 ports + box       │
-   │         ▼                                                         │
-   │  DECOMPOSE: TE0 / higher / crosstalk / reflection / radiation     │
-   │  CLOSURE:  |box_total − 1| ≤ tol  (fail ⇒ run voided)             │
-   │         ▼                                                         │
-   │  Better than best by > noise threshold & constraints?  keep/revert│
-   │  |miss| > 2σ ?  ⇒  next turn = MODEL turn (rewrite model.py)       │
-   │  journal.jsonl / journal.md / laws.md updated                     │
-   └───────────────────────────────────────────────────────────────────┘
+program.md  (you: goal, constraints, budget)        sim_config.py  (you: locked FDTD settings)
+      │                                                     │
+      ▼                                                     ▼
+ agent writes design.py ──► DRC + sanity checks ──► model.py predicts ──► simulate
+                                 │ fail: revert,            (registered)      │
+                                 │ no simulation spent                        ▼
+                                                               breakdown + closure check
+ journal / laws.md / evolution.png ◄── keep or revert ◄──── FOM + constraints
+                                        │
+                                        └── miss > 2σ ? next turn edits model.py only
 ```
+
+One iteration, in words: the agent reads the task, the current design, its model, its notes
+and the last breakdown; states a hypothesis; rewrites `design.py`; the runner builds the
+geometry, checks it, asks `model.py` for a prediction, simulates, decomposes the loss, and keeps
+the design only if it beats the best by more than the noise threshold with constraints met.
 
 ## Install
 
 ```bash
-git clone https://github.com/<you>/photonics-design-agent.git && cd photonics-design-agent
-pip install -e .            # numpy, matplotlib, requests only
-cp .env.example .env        # fill in your LLM key (and LUMERICAL_ROOT)
+git clone https://github.com/q3430468220-tech/photonics-design-agent.git
+cd photonics-design-agent
+pip install -e .
+cp .env.example .env     # add ANTHROPIC_API_KEY or OPENAI_API_KEY (+ OPENAI_BASE_URL for DeepSeek/Qwen)
 ```
 
-Python ≥ 3.9. No vendor SDKs: the Anthropic and OpenAI-compatible APIs are called with
-`requests`, so DeepSeek / Qwen / relay endpoints work by setting `OPENAI_BASE_URL`.
+Needs Python ≥ 3.9, numpy, matplotlib, requests. No vendor SDKs.
+For real simulations: Lumerical FDTD with `LUMERICAL_ROOT` pointing at the install folder.
 
-## Quick start
+## Use
 
-**1. See the loop run offline (no key, no simulator):**
+**Try it without any key or simulator** (scripted agent, analytic toy backend, ~10 s):
 
 ```bash
 python examples/demo_scripted.py
 ```
 
-A scripted "LLM" drives seven iterations against the analytic mock backend: baseline →
-tapered crossing (kept, but the over-confident model misses by 15σ) → forced model turn →
-a design that fails the port-straight sanity check (reverted, **no simulation spent**) →
-parabolic crossing (kept) → worse variant (reverted) → wider parabolic (kept).
-
-**2. Create and validate your own experiment:**
+**Run a real experiment:**
 
 ```bash
-prism init experiments/my_crossing            # copies the soi_crossing template
-# edit experiments/my_crossing/program.md
-prism check experiments/my_crossing --plot    # build, DRC, sanity, features, model prediction
-prism eval  experiments/my_crossing --manual  # ONE human-triggered simulation; inspect the breakdown
+prism init experiments/my_device         # copies the crossing template
+#   edit experiments/my_device/program.md  — goal, constraints, FOM, budget
+#   edit experiments/my_device/design.py   — a valid starting geometry
+#   edit experiments/my_device/sim_config.py if the band / mesh / rules differ
+
+prism check experiments/my_device --plot            # builds the geometry, runs DRC + sanity, no simulation
+prism eval  experiments/my_device --manual --backend lumerical
+#   one simulation you trigger yourself. Read the breakdown table and the closure error.
+#   If the judge is wrong here, everything after it is wrong. Fix sim_config.py first.
+
+prism run   experiments/my_device --backend lumerical --sims 50
+prism status experiments/my_device
+prism plot   experiments/my_device                  # evolution.png (also refreshed every iteration)
+prism review experiments/my_device                  # a fresh LLM session audits laws.md against the journal
 ```
 
-Do not skip `prism eval --manual`. The whole loop is only as good as the judge: look at the
-breakdown table and the closure error of your starting design before letting the agent spend
-budget. With `--backend lumerical` this is also where you validate the FDTD setup.
+Use `--backend mock` anywhere to run the same commands on the toy model.
 
-**3. Run the agent:**
+## Files in an experiment
 
-```bash
-prism run experiments/my_crossing --backend mock --iters 30          # toy physics, fast
-prism run experiments/my_crossing --backend lumerical --sims 50      # real FDTD (see below)
-prism status experiments/my_crossing
-prism review experiments/my_crossing     # fresh-session audit of laws.md vs the journal
-```
-
-## The evolution chart: *what* the agent did, not just how far it got
-
-`evolution.png` is refreshed after every iteration (`prism plot <dir>` regenerates it):
-
-![evolution](examples/demo_evolution.png)
-
-Every point is one simulation. The marker shape is the **kind of change** the agent declared
-(and the runner cross-checks from the geometry diff): circle = parameter change, square = shape
-change (same elements, different profile family, e.g. linear → parabolic taper, arc → Euler bend),
-diamond = topology change (elements added or replaced, e.g. add an MMI section). Green = kept,
-red = discarded, grey × = voided (closure failed). Each kept point carries the agent's own 3–8
-word label of *what it did and why* ("widen junction 1.5→2.5 µm (less diffraction)"); jumps
-larger than 15 % are bold with the gain in dB. Dashed blue lines mark where `model.py` was
-revised. The chart therefore answers, at a glance, which *method* bought each improvement and
-which plateaus were parameter polishing versus failed structural ideas.
-
-## The experiment folder
-
-| file | written by | purpose |
+| file | who edits | what it is |
 |---|---|---|
-| `program.md` | human | goal, platform, interface, FOM, budget, hints. Read-only for the agent |
-| `sim_config.py` | human | `CONFIG = SimConfig(...)`: band, mesh, PML, DRC rules, FOM thresholds, budget, gate. **Locked**; its hash is recorded with every run |
-| `design.py` | agent (design turns) | `build() -> Geometry` using `prism_min.geometry` helpers |
-| `model.py` | agent (model turns) | `predict(geom) -> {fom, sigma, breakdown?, notes}` — the agent's understanding, as code |
-| `laws.md` | agent (append-only) | lessons tagged `[prior]` / `[tentative]` / `[confirmed]`, with iteration numbers |
-| `journal.jsonl`, `journal.md` | runner | one record per iteration: hypothesis, change, change type (declared + auto), label, prediction, measurement, breakdown, decision |
-| `evolution.png` | runner | annotated FOM-vs-experiment chart (see above) |
-| `runs/iter_NNN/` | runner | snapshots of `design.py`/`model.py`, raw LLM response, `sim_result.json`, `eval.json`, plots |
-| `best/design.py` | runner | the best kept design (also what `design.py` is restored to after a revert) |
+| `program.md` | you | the task, in plain language |
+| `sim_config.py` | you | locked settings: band, mesh, PML, DRC rules, FOM thresholds, budget |
+| `design.py` | agent | `build() -> Geometry` |
+| `model.py` | agent | `predict(geom) -> {fom, sigma, ...}`, its physics model |
+| `laws.md` | agent | lessons, append-only, tagged tentative / confirmed |
+| `journal.jsonl` / `.md` | runner | every turn: hypothesis, change, type, prediction, measurement, breakdown, decision |
+| `evolution.png` | runner | the chart above |
+| `runs/iter_NNN/` | runner | snapshots, raw LLM reply, simulation data, plots |
+| `best/design.py` | runner | best kept design |
 
-## What one simulation returns
-
-All quantities are fractions of the injected power, per wavelength:
+## What a simulation returns
 
 ```
 wl(um)  IL(dB)  TE0     higher  xtalk   refl    rad     box
 1.5300   1.069  0.7818  0.0001  0.0925  0.0002  0.1239  0.9986
 ```
 
-`TE0` is the useful transmission (FOM = worst-case −10·log10 over the band). `higher` is power at
-the through port not in the fundamental mode (output mode mismatch), `xtalk` the sum over side
-ports, `refl` the backward power at the input, `rad` whatever else left the enclosing flux box.
-`box` is the *measured* total outward flux; it must be 1 ± `closure_tol`, otherwise the run is
-voided — a bad measurement is not a bad design.
-
-The same decomposition idea applies to active devices with different algebra
-(1/Q = 1/Q_c + 1/Q_int; VπL ∝ g/(n³ r₃₃ Γ); 1/f² ≈ 1/f_RC² + 1/f_photon²). Those backends are
-not written yet.
-
-## Decision rules (all in `SimConfig`)
-
-- **keep** iff constraints are satisfied (or improve, when none are yet) **and** FOM improves by
-  more than `improve_threshold_db` (the noise threshold); otherwise `design.py` is restored.
-- **prediction miss** `|measured − predicted| / σ > prediction_miss_sigma` ⇒ next turn is a model
-  turn. σ is capped at `max(sigma_floor_db, sigma_cap_rel × predicted FOM)` so the model cannot
-  hide behind huge uncertainty.
-- **understanding gate**: after `gate_min_runs` scored runs, the current `model.py` must predict
-  ≥ `gate_min_fraction` of the last `gate_window` runs within 2σ, else a model turn is forced.
-  At most `max_consecutive_model_turns` in a row, so the loop cannot stall.
-- **budget**: `max_sims` simulations; checks and model turns are free.
+Fractions of injected power. `TE0` is the useful transmission; the FOM is the worst-case
+insertion loss over the band. `box` is the measured total outward flux through a box enclosing
+the device; it must be 1 ± `closure_tol` or the run is voided (bad measurement ≠ bad design).
 
 ## Backends
 
-### `mock` — analytic toy for the crossing
-Measures the geometry from a raster (junction width, through-arm width, taper adiabaticity
-parameter, port straight length) and returns diffraction-, crosstalk-, mismatch- and
-reflection-like terms with 2 % deterministic "mesh noise". It closes (box ≈ 1) unless the port
-straights are too short, in which case it reports an unconverged run. **It is not physics** —
-it exists so the loop, guard, closure and bookkeeping can be tested anywhere. Its optimum is a
-~4.4 µm parabolic-taper crossing at ≈0.06 dB.
+- `mock`: analytic toy model of a waveguide crossing. For testing the loop, not for physics.
+- `lumerical`: FDTD through lumapi. Builds sources, monitors, a 6-face flux box and a field
+  plot from `sim_config.py`. **Not yet run on a real installation** — validate with
+  `prism eval --manual --backend lumerical`. Material names and mode-expansion result keys are
+  the likely first fixes.
 
-### `lumerical` — FDTD via lumapi
-`prism_min/backends/lumerical.py` builds the full simulation from `SimConfig` and the
-`Geometry`: extended port waveguides through the PML, mode source + reflection monitor at the
-input, power + mode-expansion monitors at the other ports, a 6-face flux box for closure, a
-z-normal field monitor for the plot. Set `LUMERICAL_ROOT` (folder containing `api/python/lumapi.py`,
-ASCII path only).
+## Current template
 
-> **Status: written against lumapi conventions but not executed where this package was
-> authored.** Validate with `prism eval <dir> --backend lumerical --manual` first. The lines most
-> likely to need a fix are the material names and the mode-expansion result keys.
+`experiments/soi_crossing`: a 220 nm SOI waveguide crossing, target worst-case insertion loss
+< 0.06 dB over 1530–1570 nm, crosstalk < −30 dB, 4-fold symmetric, 40 µm footprint.
 
-## Repository layout
+## Not done yet
+
+- Lumerical backend validation on real hardware.
+- Baseline comparison (same loop without breakdown / prediction / gate; random search; CMA-ES)
+  to measure whether the additions actually help. The journal is machine-readable for this.
+- More geometry helpers (arcs, Bézier, periodic arrays) so the agent fails less at writing polygons.
+- Active devices (MRM, TFLN modulators): same idea, different decomposition algebra.
+
+## Layout
 
 ```
-prism_min/            (package + CLI keep the method name: `prism ...`)
-  geometry.py     Geometry IR (polygons + ports), builders, raster + morphology (numpy only)
-  checks.py       DRC (min width/gap/area, ports) and sanity (mesh resolution, port straights, 4-fold symmetry)
-  config.py       SimConfig (locked settings) + hash
-  features.py     geometry features shared by mock, prompts and model.py
-  backends/       base (SimResult), mock, lumerical
-  decompose.py    loss breakdown, closure, FOM + constraints
-  guard.py        PredictionRegistry: no sim without a registered prediction for this exact geometry
-  evaluate.py     the judge: build → checks → guard → simulate → closure → score
-  experiment.py   experiment folder, safe loading of design.py / model.py, snapshots, best/
-  journal.py      JSONL + Markdown journal, agent-facing digest
-  llm.py          Anthropic / OpenAI-compatible / scripted providers (requests only)
-  prompts.py      system prompt, design turn, model turn, review
-  agent.py        the loop: mode decision, calibration, design/model turns, keep/revert, laws
-  viz.py          geometry preview + annotated evolution chart
-  cli.py          prism init | check | eval | run | status | plot | review
-experiments/soi_crossing/   template: 220 nm SOI crossing, IL < 0.06 dB target
-examples/demo_scripted.py   offline demonstration
-tests/                      26 unit + integration tests (python -m unittest discover -s tests -t .)
+prism_min/
+  geometry.py    polygons + ports, raster helpers
+  checks.py      DRC and sanity checks
+  config.py      SimConfig
+  features.py    geometry measurements shared by mock, prompts and model.py
+  backends/      base, mock, lumerical
+  decompose.py   loss breakdown, closure, FOM
+  guard.py       no simulation without a registered prediction
+  evaluate.py    build -> checks -> guard -> simulate -> closure -> score
+  experiment.py  experiment folder handling
+  journal.py     journal + digest for the agent
+  llm.py         Anthropic / OpenAI-compatible / scripted
+  prompts.py     prompts
+  agent.py       the loop
+  viz.py         geometry preview, evolution chart
+  cli.py         prism ...
+experiments/soi_crossing/   template
+examples/demo_scripted.py   offline demo
+tests/                      python -m unittest discover -s tests -t .
 ```
 
-## How to evaluate whether PRISM-Min is actually better
-
-The claim behind this repo is a hypothesis, not a result. The honest test:
-
-1. Reproduce the plain loop (disable the prediction guard and the gate, hide the breakdown) on
-   the same task and backend; this is the baseline.
-2. Add one module at a time: breakdown → prediction + 2σ rule → `model.py`/gate. Run each at the
-   same simulation budget with ≥ 3 seeds; plot best FOM vs simulations spent.
-3. Compare against random search and a standard optimizer (CMA-ES / Bayesian) on the same
-   parametrisation. Report the prediction-miss distribution as the "understanding" metric.
-
-Everything needed for (1)–(3) is in the journal (`journal.jsonl` is machine-readable).
-
-## Roadmap
-
-- Validate and harden the Lumerical backend on a real crossing (field plots, convergence check
-  of the kept design with a finer mesh).
-- Inner adjoint / gradient polish of continuous parameters inside a structure the LLM chose.
-- Multi-fidelity screening (coarse mesh / 2.5D first).
-- Small archive of structurally different candidates instead of one best.
-- Active-device decomposition backends (MRM: Δn_eff/V × overlap, 1/Q budget; TFLN MZM: VπL factors, bandwidth limits).
-
-## License
-
-MIT
+MIT license.
